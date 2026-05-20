@@ -39,6 +39,9 @@ jobs:
       - name: コーチング MD NG ワード辞書 静的検査(H8)
         run: npm run check:coaching
 
+      - name: skip 忘却防止 静的検査(テスト戦略 v0.2 §10 連動)
+        run: npm run check:skipped
+
       - name: ユニットテスト + 統合テスト(Vitest)
         run: npm run test
 

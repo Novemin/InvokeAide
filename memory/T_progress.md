@@ -1,6 +1,6 @@
 # Tさん 作業進捗
 
-**最終更新**: 2026-05-20、CI 緑化 + コーチングMD レビュー + push 準備完了
+**最終更新**: 2026-05-20、CI 緑化 + コーチングMD レビュー + push 準備完了 + GitHub 初回 push + CI 赤化対応(案A + 三重ガード)
 
 ## 現在のステータス
 
@@ -10,10 +10,24 @@
   3. push 準備(README.md + 機密情報スキャン緑)✅
   4. Sさん 申し送り文書(エルトン CC、強制ではない取捨選択前提)✅
   5. `tests/fixtures/coaching/` 先行配置(4 contexts + 3 outputs + README)+ CI 再緑化確認 ✅
-- **次タスク**(すべてエルトン明示許可後 or 受領待ち):
-  - GitHub リポジトリ作成 + push(たかしさん帰宅後の最終確認待ち)
+- **GitHub 初回 push ✅ 完了**(2026-05-20 午後):
+  - リポジトリ: https://github.com/Novemin/InvokeAide(プライベート、 たかしさん個人アカウント Novemin 直下)
+  - commit: `77d05d5` "Initial commit: Test infrastructure scaffolding by Tさん"
+  - 79 files / 30,979 insertions
+  - branch: main, tracks origin/main
+  - 副次対応: 想定外検出した `.claude/settings.local.json` を `.gitignore` 追加 + unstage(Claude Code セッション固有設定なので push 対象外)
+- **CI 赤化対応 ✅ 完了**(2026-05-20 夜):
+  - 初回 push 後 E2E ワークフロー赤化: `tests/a11y/sample.spec.ts` の axe-core スモークが最小ダミー src/App.vue に対して a11y 違反検出 → 案A(skip + 三重ガード)で対応(エルトン承認)
+  - 対応1: `tests/a11y/sample.spec.ts` を `test.skip` 化 + 解除条件コメント
+  - 対応2: `scripts/check-skipped-tests.js` 新設(コメント無し skip を CI で検出)+ package.json + ci.yml 組み込み
+  - 対応3: `memory/T_to_S.md` 新規作成(Sさん 永続申し送り、 §1 で a11y skip 解除を明記)
+  - 対応4: テスト戦略 v0.2 §10.1 「Sprint 1 期間中の既知 skip リスト」 + §10.2 「Node.js 20 actions 警告」 別タスク化を追記
+  - ローカル検証: `npm run check:all` で 全静的検査 + Vitest 8件 緑化確認
+  - 再 push: 2 commit 目で main へ反映、 E2E 緑化確認 → たかしさん Web UI 待ち
+- **次タスク**(受領待ち):
   - アンケート質問項目案_叩き台 v0.1 レビュー(受領待ち)
   - Playwright E2E ローカル検証(優先度低、CI のみ運用方針採用済み)
+  - Phase 2 末別タスク: Node.js 20 actions deprecated 警告対応(@v4→@v5、 .github/workflows/*.yml 全3ファイル、 推定 GitHub deadline 2026-10)
 
 ## 明日からのペース方針(2026-05-19 夜 エルトン共有)
 

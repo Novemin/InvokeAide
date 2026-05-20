@@ -616,6 +616,59 @@ Uさん b §10 で Sさん 確定論点として開かれている箇所:
 | 5 | **H8 新規追加**: コーチング機能(プッシュ)でも擬人化誤認・AI 明示維持を検証、NG ワード辞書をコーチング用に拡張 | 🔴 高 |
 | 6 | §22 + §20 並行最優先(Sさん が本日中に Storage interface 起草開始、Tさん は Vitest + MSW 足回り構築と並行) | 🟡 中 |
 
+### 10.1 Sprint 1 期間中の既知 skip リスト(2026-05-20 補強)
+
+GitHub 初回 push(2026-05-20)後、 E2E ワークフローでアクセシビリティスモークテストが赤化。 src/ 最小ダミー画面に対する axe-core 検査で違反検出 — これは「テスト機構が正常動作し、 本物の問題を正しく検出した」状態。
+
+**確定方針(エルトン承認、 2026-05-20)**: 案A(skip + 三重ガード)で対応
+
+- 該当テストを `test.skip` 化、 直上に解除条件コメント
+- `scripts/check-skipped-tests.js` で skip 忘却防止の静的検査を CI に組み込み
+- `memory/T_to_S.md` §1 で Sさん 申し送り化(Sprint 2 で src/App.vue 本実装時、 同 PR で skip 解除)
+
+#### 既知 skip 一覧
+
+| # | テストファイル | テスト名 | skip 理由 | 解除条件 | 担当 |
+|---|---|---|---|---|---|
+| 1 | `tests/a11y/sample.spec.ts:13` | ホーム画面に axe-core 違反が無い | 最小ダミー `src/App.vue` で WCAG 違反検出。 ダミー段階での対応は領域境界違反(Sさん 領域)| Sさん が src/ を本実装(オンボーディング/ホーム画面)に置き換え | Sさん が src/ 起草 PR に skip 解除を含める |
+
+#### skip 運用の三重ガード
+
+1. **解除条件コメント必須化**: `.skip` 直上 8行以内に `TODO(誰→誰):` `解除条件:` `担当:` を含むコメント
+2. **静的検査 CI 組み込み**: `scripts/check-skipped-tests.js` がコメント無し skip を検出 → CI 赤化
+3. **永続申し送り**: `memory/T_to_S.md` で Sさん が起草開始時に必ず参照する仕組み
+
+#### skip 解除手順(Sさん が Sprint 2 で実施)
+
+1. `src/App.vue` を最小ダミーから本実装に置き換え
+2. `tests/a11y/sample.spec.ts:13` の `test.skip` を `test` に戻す
+3. `npm run test:a11y` または `npx playwright test --project=chromium tests/a11y/` をローカル実行、 axe-core violation 0件を確認
+4. 違反が残る場合、 src/App.vue 側で a11y 対応してから PR
+5. PR description に「a11y skip 解除済み、 axe-core 0件確認済み」と明記
+
+#### Sさん 側で意識すべき a11y ポイント
+
+最小ダミーで検出された violation の典型(将来本実装でも気をつけるべき):
+
+- `<html lang="ja">` 必須(`index.html` で既に設定済み、 SPA 内で動的変更しないこと)
+- `<main>` ランドマーク or `role="main"` の明示
+- ボタンや入力欄に **アクセシブルな名前**(`aria-label` / `<label>` 関連付け)
+- カラーコントラスト 4.5:1 以上(白背景 + 薄いグレー文字は NG)
+- フォーカス可視リング を `outline: none` で消さない(消すなら代替リングを用意)
+
+詳細は §17.5 axe-core + Lighthouse CI セットアップを参照。
+
+### 10.2 副次別タスク化(2026-05-20 補強)
+
+GitHub Actions の警告として「Node.js 20 actions deprecated」 が出現:
+
+- 影響範囲: `.github/workflows/*.yml` 全3ファイル(ci.yml / e2e.yml / nightly.yml)
+- 対応内容: `actions/checkout@v4` → `@v5`、 `actions/setup-node@v4` → `@v5`、 `actions/upload-artifact@v4` → `@v5`
+- 対応コスト: 約5分
+- 推定 GitHub deadline: 2026-10 頃
+- 推奨実施タイミング: **Phase 2 末** (緊急性なし)
+- ステータス: エルトン承認済み、 Phase 2 末別タスクとして記録
+
 ---
 
 ## 11. 段階1 判断仰ぎ事項

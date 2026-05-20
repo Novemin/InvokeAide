@@ -24,7 +24,8 @@
     "format": "prettier --write \"src/**/*.{ts,vue,json}\" \"tests/**/*.{ts,vue,json}\"",
     "check:legal": "node scripts/check-legal-expressions.js",
     "check:coaching": "node scripts/check-coaching-prompts.js",
-    "check:all": "npm run lint && npm run typecheck && npm run check:legal && npm run check:coaching && npm run test",
+    "check:skipped": "node scripts/check-skipped-tests.js",
+    "check:all": "npm run lint && npm run typecheck && npm run check:legal && npm run check:coaching && npm run check:skipped && npm run test",
     "lighthouse": "lhci autorun"
   },
   "dependencies": {
