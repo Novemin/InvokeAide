@@ -1,0 +1,29 @@
+{
+  "_description": "完了肯定のみ: 今日複数タスク完了、未処理タスクなし(Sさん コーチングMD §9.1 fixtureContext2)。期待挙動: 完了肯定セクションのみで応答、3択ボタンなし。",
+  "countByRank": { "A": 0, "B": 1, "C": 0, "D": 0 },
+  "staleTasks": {
+    "A": [],
+    "B": [],
+    "C": [],
+    "D": []
+  },
+  "dueWithinDays": [],
+  "overdue": [],
+  "completedToday": [
+    {
+      "id": "t1",
+      "title": "タスクA",
+      "rank": "A",
+      "due": "2026-05-19",
+      "addedDaysAgo": 0
+    },
+    {
+      "id": "t2",
+      "title": "タスクB",
+      "rank": "B",
+      "due": null,
+      "addedDaysAgo": 1
+    }
+  ],
+  "now": "2026-05-19T18:00:00+09:00"
+}

@@ -1,0 +1,55 @@
+# Nightly ワークフロー(毎日深夜 + 手動)
+# クロスブラウザ(BrowserStack 想定、 現状は webkit + mobile-iPhone)+ 実 API 統合テスト
+# Tさん テスト戦略 v0.2 §17.6 / §17.7 整合
+# Uさん deploy-voicevox.yml の smoke test 3件(healthz/無認証/Bearer)取り込み余地
+
+name: Nightly
+
+on:
+  schedule:
+    # JST 04:00 = UTC 19:00(前日)
+    - cron: '0 19 * * *'
+  workflow_dispatch:
+
+jobs:
+  full-e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps
+
+      - name: Build
+        run: npm run build
+
+      - name: Playwright E2E 全プロジェクト
+        run: npx playwright test
+
+      - name: Playwright HTML レポート Artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-playwright-${{ github.run_id }}
+          path: playwright-report/
+          retention-days: 30
+
+  # 将来: Uさん deploy-voicevox.yml の smoke test 3件と統合する余地
+  # voicevox-smoke:
+  #   runs-on: ubuntu-latest
+  #   steps:
+  #     - name: healthz=200
+  #     - name: 無認証=401
+  #     - name: Bearer=200

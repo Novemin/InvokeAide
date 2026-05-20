@@ -1,0 +1,76 @@
+{
+  "_description": "全優先順位該当: 期限切れ / 期限間近 / A滞留 / B滞留 / C/D大量滞留 / 完了肯定 すべて発生(Sさん コーチングMD §9.1 fixtureContext1)",
+  "countByRank": { "A": 3, "B": 7, "C": 5, "D": 0 },
+  "staleTasks": {
+    "A": [
+      {
+        "id": "t1",
+        "title": "クライアントA返信",
+        "rank": "A",
+        "due": "2026-05-22",
+        "addedDaysAgo": 4
+      }
+    ],
+    "B": [
+      {
+        "id": "t2",
+        "title": "見積もり作成",
+        "rank": "B",
+        "due": null,
+        "addedDaysAgo": 9
+      }
+    ],
+    "C": [
+      {
+        "id": "t3",
+        "title": "本を読む",
+        "rank": "C",
+        "due": null,
+        "addedDaysAgo": 14
+      },
+      {
+        "id": "t4",
+        "title": "部屋の片付け",
+        "rank": "C",
+        "due": null,
+        "addedDaysAgo": 10
+      },
+      {
+        "id": "t5",
+        "title": "メモ整理",
+        "rank": "C",
+        "due": null,
+        "addedDaysAgo": 15
+      }
+    ],
+    "D": []
+  },
+  "dueWithinDays": [
+    {
+      "id": "t6",
+      "title": "請求書発行",
+      "rank": "A",
+      "due": "2026-05-21",
+      "addedDaysAgo": 1
+    }
+  ],
+  "overdue": [
+    {
+      "id": "t7",
+      "title": "銀行手続き",
+      "rank": "A",
+      "due": "2026-05-15",
+      "addedDaysAgo": 6
+    }
+  ],
+  "completedToday": [
+    {
+      "id": "t8",
+      "title": "プレゼン資料作成",
+      "rank": "A",
+      "due": "2026-05-19",
+      "addedDaysAgo": 2
+    }
+  ],
+  "now": "2026-05-19T18:00:00+09:00"
+}

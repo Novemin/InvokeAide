@@ -1,0 +1,55 @@
+# CI ワークフロー(PR 時)
+# Lint / TypeScript 型検査 / ユニット & 統合テスト / 法的書類 & コーチング NG ワード辞書
+# Tさん テスト戦略 v0.2 §17.6 / §17.7 整合
+
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: TypeScript 型検査
+        run: npm run typecheck
+
+      - name: 法的書類 NG ワード辞書 静的検査(H1/H7)
+        run: npm run check:legal
+
+      - name: コーチング MD NG ワード辞書 静的検査(H8)
+        run: npm run check:coaching
+
+      - name: ユニットテスト + 統合テスト(Vitest)
+        run: npm run test
+
+      - name: カバレッジ生成
+        run: npm run test:coverage
+        continue-on-error: true
+
+      - name: カバレッジ Artifact アップロード
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-${{ github.run_id }}
+          path: coverage/
+          retention-days: 14

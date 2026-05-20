@@ -1,0 +1,14 @@
+{
+  "_description": "空コンテキスト: タスクなし、完了もなし(Tさん 補完、Sさん コーチングMD §9.1 fixtureContext4 を完成形に)。期待挙動: 通知発火しない、または『今日はゆっくり』のような MIYU 応答(Sさん 設計判断)。",
+  "countByRank": { "A": 0, "B": 0, "C": 0, "D": 0 },
+  "staleTasks": {
+    "A": [],
+    "B": [],
+    "C": [],
+    "D": []
+  },
+  "dueWithinDays": [],
+  "overdue": [],
+  "completedToday": [],
+  "now": "2026-05-19T18:00:00+09:00"
+}

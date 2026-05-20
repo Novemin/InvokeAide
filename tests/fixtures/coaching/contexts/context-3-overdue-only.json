@@ -1,0 +1,22 @@
+{
+  "_description": "期限切れのみ: 期限を過ぎた A タスク1件のみ、他は空(Tさん 補完、Sさん コーチングMD §9.1 fixtureContext3 を完成形に)。期待挙動: 期限切れのみの応答パターン、完了肯定なし。",
+  "countByRank": { "A": 1, "B": 0, "C": 0, "D": 0 },
+  "staleTasks": {
+    "A": [],
+    "B": [],
+    "C": [],
+    "D": []
+  },
+  "dueWithinDays": [],
+  "overdue": [
+    {
+      "id": "t1",
+      "title": "確定申告",
+      "rank": "A",
+      "due": "2026-05-15",
+      "addedDaysAgo": 8
+    }
+  ],
+  "completedToday": [],
+  "now": "2026-05-19T18:00:00+09:00"
+}
