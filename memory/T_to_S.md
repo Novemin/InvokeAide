@@ -131,6 +131,214 @@ Tさん は毎セッション開始時に `memory/T_to_S.md` だけでなく
 
 ---
 
+## 4. 🔴 6月実装期間で意識して欲しい「テスト容易性 設計原則」 1ページサマリ
+
+### 位置づけ
+
+2026-05-22 起草。 ベータ 6/20 完成 → 7月家族配布の逆算で、 Sさん が 5/26 以降に `src/` 起草を本格化する **6月実装期間** に「Tさん 観点でテストしやすい設計」 を意識してもらうための **1ページガイダンス**。
+
+Sさん v0.4 §9.7「Provider 化原則」 と親和的、 同方向の細則として読んでください。
+本書は **設計原則** であって、 個別実装の正解を示すものではありません。 Sさん 判断を尊重しつつ、 「迷ったら こちら寄り」 の選択指針として使ってください。
+
+### 原則1: 純粋関数を分離する(Pure Function Boundary)
+
+副作用(fetch / localStorage / Date.now / Math.random / DOM 操作)を持つコードと、 入力 → 出力の純粋計算 部分を **同じ関数に混ぜない** 。 純粋部分は別関数として export 可能な形にしてください。
+
+#### なぜ
+
+- 純粋関数は Vitest 1秒テストで完全網羅可能
+- 副作用付き関数は MSW / モック / E2E が必要で 100倍 遅い
+
+#### 適用例
+
+```typescript
+// 🟢 Good: ロジックと I/O を分離
+export function buildCoachingMessage(context: CoachingContext): string { /* 純粋 */ }
+async function sendCoaching(context: CoachingContext): Promise<void> {
+  const message = buildCoachingMessage(context); // 純粋
+  await api.post('/notify', { message });       // I/O
+}
+
+// 🔴 Bad: 混在
+async function sendCoaching(context: CoachingContext): Promise<void> {
+  const userPrefs = await loadPrefs();          // I/O
+  const message = `${context.user}, ${userPrefs.tone}...`; // ロジック
+  await api.post('/notify', { message });       // I/O
+}
+```
+
+#### Tさん 確認: 純粋関数化されている場合、 ユニットテスト1行で網羅できる。
+
+---
+
+### 原則2: Interface 経由で依存を注入する(Dependency Injection)
+
+外部サービス(Google Drive / Tasks / Calendar / Gemini / VOICEVOX 等) は **必ず interface 経由** で受け取り、 直接 `import` しない。 Sさん v0.4 §9.7 Provider 化原則そのもの、 本項はテスト視点での補強。
+
+#### なぜ
+
+- 本物の API を呼ばずに `MemoryProvider` / `FlakyProvider` で差し替えてテスト可能
+- Storage interface(`MemoryStorage` / `FlakyStorage`)が既に確定済み、 同パターンを LLM / TTS / STT / Auth にも横展開
+
+#### 適用例
+
+```typescript
+// 🟢 Good: コンストラクタ注入
+class CoachingService {
+  constructor(
+    private readonly llm: AIProvider,
+    private readonly storage: StorageProvider,
+  ) {}
+}
+// テストでは new CoachingService(new MockAI(), new MemoryStorage())
+
+// 🔴 Bad: モジュールスコープで生成
+import { geminiClient } from './gemini'; // ← 差し替え不能
+class CoachingService {
+  async run() { return geminiClient.generate(...); }
+}
+```
+
+#### Tさん 確認: テスト時に new XxxProvider() で差し替え可能か?
+
+---
+
+### 原則3: 時刻・乱数を引数で受け取る(Time / Random Injection)
+
+`Date.now()` / `new Date()` / `Math.random()` / `crypto.randomUUID()` を関数内で **直接呼ばず**、 引数や DI で受け取る。
+
+#### なぜ
+
+- 時刻依存テスト(優先順位ロジック §2.2.2、 6段階優先順位、 18:00 通知時刻判定 等)が**決定的に**書ける
+- vitest の `vi.useFakeTimers()` だけだと「タイムゾーン考慮」 等で漏れが出やすい
+
+#### 適用例
+
+```typescript
+// 🟢 Good: 引数で受け取る
+export function prioritizePush(tasks: Task[], now: Date = new Date()): PushItem[] {
+  return tasks.filter((t) => isOverdue(t, now));
+}
+// テスト: prioritizePush(tasks, new Date('2026-06-20T18:00:00+09:00'))
+
+// 🔴 Bad: 関数内で直接呼ぶ
+export function prioritizePush(tasks: Task[]): PushItem[] {
+  const now = new Date(); // ← テストで制御不能
+  return tasks.filter((t) => isOverdue(t, now));
+}
+```
+
+#### Tさん 確認: 任意の時刻でテストを再現できるか?
+
+---
+
+### 原則4: ファイル境界 = テスト境界
+
+Vue SFC(`*.vue`)の `<script setup>` 内に複雑なロジックを書くと、 Vitest からの直接テストが困難。 ロジックは `*.ts` ファイルに切り出して `import` する形を基本とする。
+
+#### なぜ
+
+- `*.vue` の単体テストは `@vue/test-utils` 経由で重い(マウント時間 100ms〜)
+- `*.ts` 純粋ロジックは vitest 1ms 未満で網羅可能
+
+#### 適用例
+
+```vue
+<!-- 🟢 Good: 薄いコンポーネント -->
+<script setup lang="ts">
+import { computeCoachingContext } from './coaching/context';
+import { ref } from 'vue';
+const tasks = ref<Task[]>([]);
+const context = computed(() => computeCoachingContext(tasks.value));
+</script>
+```
+
+```typescript
+// coaching/context.ts(別ファイル、 純粋関数)
+export function computeCoachingContext(tasks: Task[]): CoachingContext { /* 純粋 */ }
+```
+
+#### Tさん 確認: `*.vue` の `<script>` 内に長いロジックがないか?
+
+---
+
+### 原則5: SSR-safe / dynamic import 制御
+
+`window` / `document` / `localStorage` / `navigator` 等の **ブラウザ専用 API** をモジュールトップレベルで参照しない。 関数内 or `onMounted` 内に閉じ込める。
+
+#### なぜ
+
+- Vitest jsdom 環境では多くがエミュレートされているが、 一部欠落(`navigator.serviceWorker`、 `MediaRecorder` 等)
+- 将来 SSR / SSG / Astro 等へ移行する余地を残す
+
+#### 適用例
+
+```typescript
+// 🟢 Good: 関数内
+function getStorageValue(): string | null {
+  if (typeof window === 'undefined') return null;
+  return localStorage.getItem('key');
+}
+
+// 🔴 Bad: モジュールトップレベル
+const stored = localStorage.getItem('key'); // ← jsdom や SSR で即エラー
+```
+
+#### Tさん 確認: jsdom 環境(`tests/unit/`)で import するだけでエラーが出ないか?
+
+---
+
+### 原則6: 依存の方向は「外 → 内」 だけ
+
+ドメイン層(`src/domain/`)や interface 定義(`src/interfaces/`)は、 UI 層(`src/components/`)や Provider 実装(`src/providers/`)を **import してはいけない**。 一方向の依存だけ許す。
+
+#### なぜ
+
+- ドメインテスト(優先順位ロジック、 コーチングコンテキスト構築 等)が Vue や Google API に依存せず単体テスト可能
+- 「Provider 化原則」 の正しい運用には方向制御が前提
+
+#### 適用例
+
+```
+src/
+├── domain/           ← 何にも依存しない(純粋ロジック)
+├── interfaces/       ← domain のみ依存可
+├── providers/        ← interfaces 経由でドメインから呼ばれる、 外部 SDK に依存
+├── application/      ← interfaces を使ってユースケース合成
+└── ui/components/    ← application を使う、 最外層
+```
+
+#### Tさん 確認: `src/domain/*.ts` が `vue` / `pinia` / `gemini` をimport していないか?
+
+---
+
+### サマリ表(チェックリスト形式)
+
+| # | 原則 | テスト時のメリット | Sさん 起草時の自己チェック |
+|---|---|---|---|
+| 1 | 純粋関数の分離 | 1ms ユニットテスト | I/O とロジック混在していないか |
+| 2 | Interface 経由の DI | Memory/Flaky で差し替え | 直接 import していないか |
+| 3 | 時刻・乱数の注入 | 決定的テスト | Date.now() を関数内で直接呼んでいないか |
+| 4 | ファイル境界 = テスト境界 | 100倍速い vitest | *.vue の `<script>` が長くないか |
+| 5 | SSR-safe | jsdom で import エラーなし | モジュールトップレベルで window 触っていないか |
+| 6 | 依存の方向制御 | ドメイン単体テスト | domain が UI を import していないか |
+
+### Tさん 側の対応(完了済み + 進行中)
+
+- ✅ Storage interface の MemoryStorage / FlakyStorage は Uさん 設計で既に確定(原則2 の基盤)
+- ✅ AIProvider interface は Sさん v0.4 §3 で確定方向(原則2 の LLM 軸)
+- 🟡 Provider contract テスト 設計素案 = 5/26 スコープ議論で議題化(P1 案として保留)
+- 🟢 本サマリは 6月実装期間中 PR レビューで「原則 N に該当する設計か?」 として参照される予定
+
+### なぜ「申し送り」 という形式か
+
+- 仕様書・テスト戦略の **正式文書ではなく**、 「Tさん から Sさん への 1ページ ガイド」 という軽量な位置づけ
+- 6月実装中に Sさん がコードを書く時、 1スクロールで読める範囲に重要原則を集約
+- Tさん レビュー時の共通参照点(「原則3 に該当しますね、 修正お願いします」 と短く伝えられる)
+- 5/26 スコープ議論で「もっと厳密なテスト戦略 v0.3 起草が必要」 と判断されたら、 本サマリは v0.3 の出発点になる
+
+---
+
 ## 改訂方針
 
 - Sprint ごとに溜まった申し送りを整理、 不要になった項目は **削除せず「対応完了」ラベル化** で残置
@@ -153,4 +361,4 @@ Tさん は毎セッション開始時に `memory/T_to_S.md` だけでなく
 
 ---
 
-**起草: Tさん、 2026-05-20**
+**起草: Tさん、 2026-05-20 / §4 追加 2026-05-22**
