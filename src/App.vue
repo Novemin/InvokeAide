@@ -1,8 +1,10 @@
 <script setup lang="ts">
-// InvokeAide 最小ダミーコンポーネント(Tさん 基盤スケルトン用)
-// Sさん が本格実装を被せる土台。 機能ロジックは追加せず、 CI 緑化のみが目的。
+import AiDisclosureModal from '@/components/AiDisclosureModal.vue';
+
+// App.vue は薄いシェル: h1 + subtitle + router-view + footer + AI 明示モーダル
+// Tさん 既存テスト(h1 = "InvokeAide" / footer.ai-disclosure = "AI...対話システム")を維持
 const greeting = 'InvokeAide';
-const subtitle = '秘書召喚アプリ — テスト基盤スケルトン稼働中';
+const subtitle = '秘書召喚アプリ';
 </script>
 
 <template>
@@ -16,16 +18,14 @@ const subtitle = '秘書召喚アプリ — テスト基盤スケルトン稼働
     <p class="subtitle">
       {{ subtitle }}
     </p>
-    <!--
-      本アプリは AI を用いた対話システムです(法的書類 v0.3 §6.1 / Beta_v1 §10 #1)
-      画面下の AI 明示宣言は Sさん の本格実装で組み込まれる予定。
-    -->
+    <router-view />
     <footer
       class="ai-disclosure"
       role="contentinfo"
     >
       本アプリは AI を用いた対話システムです
     </footer>
+    <AiDisclosureModal />
   </main>
 </template>
 
@@ -35,9 +35,8 @@ const subtitle = '秘書召喚アプリ — テスト基盤スケルトン稼働
   display: flex;
   flex-direction: column;
   align-items: center;
-  justify-content: center;
   padding: max(12px, env(safe-area-inset-top)) max(12px, env(safe-area-inset-right))
-    max(12px, env(safe-area-inset-bottom)) max(12px, env(safe-area-inset-left));
+    max(48px, env(safe-area-inset-bottom)) max(12px, env(safe-area-inset-left));
   background-color: #3f5f3f;
   color: #ffffff;
   font-family: system-ui, -apple-system, 'Hiragino Sans', 'Yu Gothic', sans-serif;
@@ -46,11 +45,11 @@ const subtitle = '秘書召喚アプリ — テスト基盤スケルトン稼働
 
 h1 {
   font-size: 2rem;
-  margin: 0 0 0.5rem 0;
+  margin: 1rem 0 0.25rem 0;
 }
 
 .subtitle {
-  margin: 0;
+  margin: 0 0 1rem 0;
   opacity: 0.85;
 }
 
