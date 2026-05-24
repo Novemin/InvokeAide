@@ -39,5 +39,8 @@ test-results/
 .env.*.local
 !.env.example
 
+# Sさん 一時スクリプト(B1 スクリーンショット撮影等、 commit 対象外)
+scripts/_internal/
+
 # Misc
 *.tsbuildinfo
