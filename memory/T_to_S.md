@@ -121,6 +121,36 @@ test.skip('xxx', () => { ... });  // ← CI 赤化、 検査で違反検出
 
 ---
 
+## 5. 🟡 Google Tasks/Calendar API 実機検証 受け入れ基準(2026-05-25 追加)
+
+### 位置づけ
+
+Sさん commit `73677a8` で起草された `scripts/verify-tasks-api/` の 4 検証スクリプト(01 due 時刻破棄 / 02 deadline 不存在 / 03 taskSeries 不存在 / 04 notes 構造化記法往復)に対する Tさん 受け入れ基準。
+
+### 本文
+
+詳細は `docs/Phase2/Phase2_GoogleTasks実機検証_受け入れ基準_v0.1_2026-05-25.md` を参照。
+
+要点:
+- **コア受け入れ基準** (9項目): C1.1.1 〜 C1.4.3(各検証スクリプトの観測値照合)
+- **運用安全性** (2項目): cleanup 成功 + 残置時の手動 cleanup 可能性
+- **実行整合性** (1項目): run-all.js exit code
+- **食い違い検出時の取り扱い**: 隠蔽禁止、 観測値・仮説・影響範囲・対策案の4点必須記録
+- **仕様§1.3 依存項目** (S1〜S6): 検証スコープ外、 B2 実装後のテストへ申し送り
+
+### Sさん 検証実行時のお願い
+
+検証実行後、 以下を Tさん へ受領できる形でお願いします:
+
+1. `node scripts/verify-tasks-api/run-all.js` の **標準出力全文**(JSON 含む)
+2. プロセス **exit code**(0 = 全 PASS、 1 = 1件以上 FAIL/ERROR)
+3. 実行環境メモ(Node.js バージョン / googleapis パッケージバージョン / 検証用 Google アカウント識別子 伏字 OK)
+4. cleanup 警告ログの有無(stderr 確認)
+
+Tさん は受領後、 `memory/Tech_validation_GoogleTasksAPI_<実行日>.md` を起草し、 受け入れ基準照合 + 食い違い記録 + B2 GO/NO-GO 判定を文書化します。
+
+---
+
 ## 3. 🟢 Sさん から Tさん への逆方向申し送りについて
 
 Sさん 側で「Tさん にお願いしたいテスト追加 / 修正」が出た場合は、 別ファイル `memory/S_to_T.md`
