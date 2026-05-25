@@ -12,7 +12,7 @@ CLAUDE.md §9 のメモリ運用ルールに基づく、Sさん・Tさん 共通
 
 - [Tさん→Sさん 申し送り](T_to_S.md) — Sさん 起草開始時に必ず参照、 a11y skip 解除 + lighthouse 指摘再確認 + テスト容易性 設計原則 + Google Tasks API 検証受領手順
 - [npm audit 18件 整理](Tech_debt_npm_audit_2026-05-22.md) — Phase 2 末別タスクのインプット、 @lhci/cli クラスタ13件 + vite/vitest クラスタ6件 に集中、 本番リスクなし
-- [Google Tasks 検証 受け入れ基準 v0.1](../docs/Phase2/Phase2_GoogleTasks実機検証_受け入れ基準_v0.1_2026-05-25.md) — Sさん commit 73677a8 検証スクリプトの品質ゲート、 コア9項目 + 食い違い検出時の取り扱い + B2 後 申し送り 6項目
+- [Google Tasks 検証 受け入れ基準 v0.2](../docs/Phase2/Phase2_GoogleTasks実機検証_受け入れ基準_v0.2_2026-05-26.md) — Sさん commit 73677a8 検証スクリプトの品質ゲート、 コア9項目 + 食い違い検出時の取り扱い + B2 後 申し送り 6項目(v0.1 2026-05-25 → v0.2 2026-05-26 で公式確認格上げ + 対策案 技術顧問エスカレーションへ)
 
 ## 用語・呼称集(整合チェック観点3 の派生物として今後追加)
 
