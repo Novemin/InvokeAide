@@ -1,7 +1,9 @@
-// Skeleton for GoogleAuthProvider (案2 配置, 2026-05-26)
-// 実装本体は Q-U-j-3, Q-U-j-5 (Sさん 回答待ち) 解決 + SecretStore 完成後に着手
+// Skeleton for GoogleAuthProvider (案2 配置, 2026-05-26 / contract v0.2 適用後)
+// 実装本体は Q-U-j-3, Q-U-j-5 (Sさん 回答済、 contract v0.2 反映済) + SecretStore 完成後に着手
 // Q-U-j-4 確定済: PKCE code_verifier は localStorage 保管 (キー 'invokeaide.pkce.codeVerifier')、
 //                  コールバック完了時に即削除
+// C2 (Q-U-j-5): onStageChange callback に cause 引数追加 (StageChangeCause)
+// C3 (Q-U-j-6): getGrantedScopes() を追加
 
 import type { Unsubscribe } from '@/interfaces/types'
 import type {
@@ -11,6 +13,7 @@ import type {
   AuthProvider,
   AuthResult,
   AuthStage,
+  StageChangeCause,
 } from '@/interfaces/AuthProvider'
 
 export class GoogleAuthProvider implements AuthProvider {
@@ -46,7 +49,11 @@ export class GoogleAuthProvider implements AuthProvider {
     throw new Error('GoogleAuthProvider.signOut() not implemented yet')
   }
 
-  onStageChange(_cb: (stage: AuthStage) => void): Unsubscribe {
+  onStageChange(_cb: (stage: AuthStage, cause: StageChangeCause) => void): Unsubscribe {
     throw new Error('GoogleAuthProvider.onStageChange() not implemented yet')
+  }
+
+  async getGrantedScopes(): Promise<string[] | null> {
+    throw new Error('GoogleAuthProvider.getGrantedScopes() not implemented yet')
   }
 }

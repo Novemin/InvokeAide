@@ -1,9 +1,11 @@
 // src/implementations/index.ts
-// 案2 (2026-05-26): スケルトン配置のみ。 実装本体は Q-U-j 解消後に順次着手。
-// WebSpeechTTSProvider は B2 contract 引き継ぎメモ §6.2 案 X/Y/Z 確定後に追加。
+// 2026-05-26 (contract v0.2 適用後):
+//   - IndexedDbSecretStore: 本実装完了 (Q-U-j-1/2 解消)
+//   - GoogleAuthProvider / DriveStorageProvider / VoicevoxTTSProvider: skeleton (依存順で順次本実装)
+//   - WebSpeechTTSProvider: ベータでは未実装、 v1.1 以降 (Q-U-j-13 案 Z 確定)
 
 export { IndexedDbSecretStore } from './IndexedDbSecretStore'
-export type { SecretStoreDeps } from './IndexedDbSecretStore'
+// SecretStoreDeps は contract v0.2 で @/interfaces/SecretStore に移管 (C1)
 
 export { GoogleAuthProvider } from './GoogleAuthProvider'
 
