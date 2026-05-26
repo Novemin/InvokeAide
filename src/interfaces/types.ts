@@ -92,7 +92,7 @@ export interface ResourceMeta {
   /** RFC3339 UTC */
   modifiedTime: string;
   etag: string;
-  source: 'drive' | 'cache' | 'pending';
+  source: 'drive' | 'cache' | 'pending' | 'bundled';
 }
 
 // -- 同期状態 -----------------------------------------------

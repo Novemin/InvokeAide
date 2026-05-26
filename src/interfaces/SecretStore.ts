@@ -12,8 +12,10 @@
 //   - getSecret() で取得した値はメモリ上では平文だが、 永続化層では暗号化
 //   - clearAll() 後に getSecret() は必ず null を返す
 
+import type { Clock, Logger } from './types';
+
 export interface SecretStore {
-  initialize(): Promise<SecretStoreInitResult>;
+  initialize(deps: SecretStoreDeps): Promise<SecretStoreInitResult>;
   putSecret(key: SecretKey, value: string): Promise<SecretOpResult>;
   getSecret(key: SecretKey): Promise<string | null>;
   removeSecret(key: SecretKey): Promise<SecretOpResult>;
@@ -36,3 +38,13 @@ export type SecretStoreInitResult =
 export type SecretOpResult =
   | { ok: true }
   | { ok: false; reason: 'not_initialized' | 'crypto_error' | 'storage_quota' | 'unknown' };
+
+/**
+ * SecretStore.initialize() に注入する依存。
+ * Clock 抽象遵守(直接 new Date() しない、 テスト容易性のため deps 経由で差し替え可)。
+ * 引き継ぎメモ §1 / Q-U-j-1 (C1) で contract 側に追記確定。
+ */
+export interface SecretStoreDeps {
+  clock: Clock;
+  logger?: Logger;
+}

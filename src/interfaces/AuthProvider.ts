@@ -29,7 +29,10 @@ export interface AuthProvider {
   /** silent refresh のみ強制(access_token を更新) */
   silentRefresh(): Promise<AccessTokenResult>;
   signOut(): Promise<void>;
-  onStageChange(cb: (stage: AuthStage) => void): Unsubscribe;
+  /** Q-U-j-5 (C2): cb の 2 引数目で cause を渡す(user_signout / refresh_failed 等を UI 側で区別) */
+  onStageChange(cb: (stage: AuthStage, cause: StageChangeCause) => void): Unsubscribe;
+  /** Q-U-j-6 (C3): 現在保持している granted scopes を返す。 unauth 時は null。 StorageProvider が drive_denied 判定に使う */
+  getGrantedScopes(): Promise<string[] | null>;
 }
 
 export interface AuthDeps {
@@ -51,6 +54,18 @@ export interface AuthConfig {
 }
 
 export type AuthStage = 'unauth' | 'stage1' | 'stage2';
+
+/**
+ * onStageChange の cause 引数。
+ * 「単純な signOut」 と「予期せぬ refresh 失効」 を UI 側で区別するため。
+ * Q-U-j-5 (C2) で追加。 'unknown' で「未来縛らない」 原則に整合。
+ */
+export type StageChangeCause =
+  | 'user_signout' // 明示的に signOut() が呼ばれた
+  | 'refresh_failed' // silent refresh が失敗(token 失効)
+  | 'consent_granted' // requestStage*Consent 成功で昇格
+  | 'restored_from_storage' // initialize 時に refresh_token から復元
+  | 'unknown';
 
 export type AuthInitResult =
   | { ok: true; restored: boolean; stage: AuthStage }
