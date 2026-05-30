@@ -49,7 +49,7 @@ export interface AuthConfig {
   redirectUri: string;
   /** 例: ['openid', 'email', 'profile', 'drive.file', 'tasks'] */
   stage1Scopes: string[];
-  /** 例: ['calendar'] */
+  /** 例: ['calendar.events'](2026-05-28 たかしさん判断: フル calendar ではなくイベントのみ。 専用サブカレンダーは作らずメインに集約) */
   stage2AdditionalScopes: string[];
 }
 
