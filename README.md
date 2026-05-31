@@ -90,6 +90,28 @@ npm install
 
 Node.js 20 LTS 以上(ローカル開発は Node 22+/24 でも動く想定、ただし CI は 20 で固定)。
 
+### 環境変数(.env.local)
+
+OAuth クライアント ID 等の環境変数はリポジトリに含めない。各自ローカルで設定する:
+
+```bash
+# テンプレートをコピー
+cp .env.example .env.local   # PowerShell: Copy-Item .env.example .env.local
+```
+
+1. `.env.local` を開き、実際の OAuth クライアント ID 等を設定する
+2. `.env.local` は **commit 対象外**(個人の認証情報のため、`.gitignore` で除外済み)
+3. `.env.example` はプレースホルダのみのテンプレート(commit 対象)
+4. Vite では `import.meta.env.VITE_*` で参照する(`VITE_` プレフィックス必須)
+
+| 変数 | 用途 |
+|---|---|
+| `VITE_GOOGLE_CLIENT_ID` | Google OAuth クライアント ID |
+| `VITE_GOOGLE_REDIRECT_URI` | OAuth リダイレクト URI(ローカル: `http://localhost:3030/auth/callback`) |
+| `VITE_VOICEVOX_ENDPOINT` | VOICEVOX エンジンのエンドポイント |
+| `VITE_VOICEVOX_AUTH_TOKEN` | VOICEVOX 認証トークン(必要時) |
+| `VITE_GEMINI_API_KEY_FALLBACK` | Gemini API キーのフォールバック(本番は BYOK のため空でOK) |
+
 ### よく使うコマンド
 
 | コマンド | 用途 |
