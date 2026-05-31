@@ -20,8 +20,8 @@ export interface Settings {
     calendarConnected: boolean;
   };
   calendar: {
-    dedicatedCalendarId: string | null;
-    manageMainCalendar: boolean;
+    // メインカレンダー集約。将来の設定用に名前空間を維持
+    // (2026-05-28 確定: 専用サブカレンダーは作らず calendar.events でメインに集約)
   };
   ai: {
     provider: AiProviderId;
