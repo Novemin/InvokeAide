@@ -87,6 +87,9 @@ export class DriveStorageProvider implements StorageProvider {
   private static readonly P_LOGS = 'MIYU_App_Data/logs'
   private static readonly P_CONVERSATIONS = 'MIYU_App_Data/logs/conversations'
   private static readonly P_SETTINGS = 'MIYU_App_Data/config/settings.json'
+  private static readonly P_INDEX = 'MIYU_App_Data/config/index.json'
+  private static readonly P_PROFILE = 'MIYU_App_Data/config/profile.md'
+  private static readonly P_MANUAL = 'MIYU_App_Data/config/manual.md'
 
   private deps: StorageDeps | null = null
   // 論理パス → driveFileId の解決メモ(段階1は in-memory のみ。永続キャッシュは段階2)
@@ -367,13 +370,53 @@ export class DriveStorageProvider implements StorageProvider {
     throw new Error('DriveStorageProvider.watchSettings() not implemented yet (段階2)')
   }
 
-  // -- キャラ (F2 / F6 / F7) — 段階2 ------------------------
-  async loadCharacterIndex(_opts?: LoadOptions): Promise<LoadResult<CharacterIndex>> {
-    throw new Error('DriveStorageProvider.loadCharacterIndex() not implemented yet (段階2)')
+  // -- キャラ (F2 index.json / F6 / F7) ---------------------
+  // loadCharacterIndex / saveCharacterIndex は段階2b(settings 同型の JSON)。
+  // loadCharacterMd / saveCharacterMd / loadCoachingMd / saveCoachingMd / diffBundledVsDrive は段階2c。
+  async loadCharacterIndex(opts?: LoadOptions): Promise<LoadResult<CharacterIndex>> {
+    return this.loadConfigFile<CharacterIndex>(
+      'index.json',
+      DriveStorageProvider.P_INDEX,
+      opts,
+      (text) => {
+        try {
+          return { ok: true, value: JSON.parse(text) as CharacterIndex }
+        } catch {
+          return { ok: false }
+        }
+      },
+    )
   }
 
-  async saveCharacterIndex(_index: CharacterIndex): Promise<SaveResult> {
-    throw new Error('DriveStorageProvider.saveCharacterIndex() not implemented yet (段階2)')
+  async saveCharacterIndex(index: CharacterIndex): Promise<SaveResult> {
+    const deps = this.deps
+    if (!deps) {
+      return { ok: false, reason: 'unknown' }
+    }
+    try {
+      // settings 同様 lastUpdated を必ず更新、schemaVersion は '1' リテラル固定
+      const toSave: CharacterIndex = {
+        ...index,
+        schemaVersion: '1',
+        lastUpdated: deps.clock.now().toISOString(),
+      }
+      const body = JSON.stringify(toSave, null, 2)
+      const meta = await this.putConfigFile(
+        'index.json',
+        DriveStorageProvider.P_INDEX,
+        'application/json',
+        body,
+        'F2',
+      )
+      await this.cache?.set(DriveStorageProvider.P_INDEX, toSave, meta)
+      return { ok: true, meta }
+    } catch (err) {
+      // 412 競合検知のみ(本処理は段階2e、saveSettings 参照)
+      if (err instanceof DriveHttpError && err.kind === 'conflict') {
+        return { ok: false, reason: 'conflict' }
+      }
+      return { ok: false, reason: this.toSaveReason(err) }
+    }
   }
 
   async loadCharacterMd(_id: string, _opts?: LoadOptions): Promise<LoadResult<string>> {
@@ -397,18 +440,51 @@ export class DriveStorageProvider implements StorageProvider {
     throw new Error('DriveStorageProvider.diffBundledVsDrive() not implemented yet (段階2)')
   }
 
-  // -- プロファイル (F4) — 段階2 ----------------------------
-  async loadProfile(_opts?: LoadOptions): Promise<LoadResult<Profile>> {
-    throw new Error('DriveStorageProvider.loadProfile() not implemented yet (段階2)')
+  // -- プロファイル (F4 profile.md) — 段階2b -----------------
+  // profile.md は YAML フロントマター + body。Profile 型({frontmatter, body})へ相互変換する。
+  async loadProfile(opts?: LoadOptions): Promise<LoadResult<Profile>> {
+    return this.loadConfigFile<Profile>(
+      'profile.md',
+      DriveStorageProvider.P_PROFILE,
+      opts,
+      // フロントマター解析は寛容(壊れていても body 全体として扱う)ため parse は常に成功
+      (text) => ({ ok: true, value: this.parseProfileMd(text) }),
+    )
   }
 
-  async saveProfile(_profile: Profile): Promise<SaveResult> {
-    throw new Error('DriveStorageProvider.saveProfile() not implemented yet (段階2)')
+  async saveProfile(profile: Profile): Promise<SaveResult> {
+    const deps = this.deps
+    if (!deps) {
+      return { ok: false, reason: 'unknown' }
+    }
+    try {
+      const body = this.serializeProfileMd(profile)
+      const meta = await this.putConfigFile(
+        'profile.md',
+        DriveStorageProvider.P_PROFILE,
+        'text/markdown',
+        body,
+        'F4',
+      )
+      await this.cache?.set(DriveStorageProvider.P_PROFILE, profile, meta)
+      return { ok: true, meta }
+    } catch (err) {
+      if (err instanceof DriveHttpError && err.kind === 'conflict') {
+        return { ok: false, reason: 'conflict' }
+      }
+      return { ok: false, reason: this.toSaveReason(err) }
+    }
   }
 
-  // -- マニュアル (F5、読みのみ) — 段階2 --------------------
-  async loadManual(_opts?: LoadOptions): Promise<LoadResult<string>> {
-    throw new Error('DriveStorageProvider.loadManual() not implemented yet (段階2)')
+  // -- マニュアル (F5 manual.md、読みのみ) — 段階2b ---------
+  // 生テキストをそのまま返す。saveManual は contract に無い(マニュアルは読み専用)。
+  async loadManual(opts?: LoadOptions): Promise<LoadResult<string>> {
+    return this.loadConfigFile<string>(
+      'manual.md',
+      DriveStorageProvider.P_MANUAL,
+      opts,
+      (text) => ({ ok: true, value: text }),
+    )
   }
 
   // -- 履歴 (F8 / F9、追記専用) — 段階2 ---------------------
@@ -601,6 +677,29 @@ export class DriveStorageProvider implements StorageProvider {
     return fileId
   }
 
+  /**
+   * config 直下の任意ファイル(index.json / profile.md / manual.md 等)の fileId を解決。
+   * 読み取り専用、無ければ null(作成はしない)。段階2b で追加。
+   */
+  private async resolveConfigChildFileId(
+    fileName: string,
+    logicalPath: string,
+  ): Promise<string | null> {
+    const cached = this.fileIdMap.get(logicalPath)
+    if (cached) {
+      return cached
+    }
+    const configId = await this.findFolderId(['MIYU_App_Data', 'config'])
+    if (!configId) {
+      return null
+    }
+    const fileId = await this.findChildId(configId, fileName, false)
+    if (fileId) {
+      this.fileIdMap.set(logicalPath, fileId)
+    }
+    return fileId
+  }
+
   /** ルートから順にフォルダを辿って末端の fileId を返す(無ければ null、作成はしない) */
   private async findFolderId(segments: string[]): Promise<string | null> {
     let parent = 'root'
@@ -686,6 +785,163 @@ export class DriveStorageProvider implements StorageProvider {
       etag: json.version ?? json.md5Checksum ?? '',
       source: 'drive',
     }
+  }
+
+  // -- config 直下ファイルの共通 read / write(段階2b) -------
+  // loadSettings / saveSettings(段階2a)と同型の処理を、index.json / profile.md /
+  // manual.md でも使えるよう汎用化したもの。parse / serialize のみ各メソッドで差し替える。
+  // (将来 loadSettings / saveSettings 自身もこの口に寄せられるが、2a 実装を据え置くため今回は触らない)
+
+  /**
+   * config 直下ファイルをキャッシュ経由で読む共通処理。
+   * cache hit(fresh または allowStaleCache)→ cached を返す。miss → Drive 取得 + cache 更新。
+   * parse はテキストを T へ変換し、失敗時は { ok: false }(= reason:'parse_error')。
+   */
+  private async loadConfigFile<T>(
+    fileName: string,
+    logicalPath: string,
+    opts: LoadOptions | undefined,
+    parse: (text: string) => { ok: true; value: T } | { ok: false },
+  ): Promise<LoadResult<T>> {
+    const deps = this.deps
+    if (!deps) {
+      return { ok: false, reason: 'unknown' }
+    }
+
+    const forceFresh = opts?.forceFresh ?? false
+    const allowStaleCache = opts?.allowStaleCache ?? false
+
+    if (!forceFresh && this.cache) {
+      const hit = await this.cache.get<T>(logicalPath)
+      if (hit && (hit.fresh || allowStaleCache)) {
+        return { ok: true, value: hit.value, meta: { ...hit.meta, source: 'cache' } }
+      }
+    }
+
+    try {
+      const fileId = await this.resolveConfigChildFileId(fileName, logicalPath)
+      if (!fileId) {
+        return { ok: false, reason: 'not_found' }
+      }
+
+      const res = await this.driveApi(
+        'GET',
+        `${DriveStorageProvider.DRIVE_FILES}/${fileId}?alt=media`,
+      )
+      const text = await res.text()
+      const parsed = parse(text)
+      if (!parsed.ok) {
+        return { ok: false, reason: 'parse_error' }
+      }
+
+      const meta = await this.fetchFileMeta(fileId)
+      if (meta.etag) {
+        this.etagMap.set(logicalPath, meta.etag)
+      }
+      await this.cache?.set(logicalPath, parsed.value, meta)
+      return { ok: true, value: parsed.value, meta }
+    } catch (err) {
+      const reason = this.toLoadReason(err)
+      if (reason === 'offline' || reason === 'rate_limit') {
+        const stale = this.cache ? await this.cache.get<T>(logicalPath) : null
+        if (stale) {
+          return { ok: false, reason, cached: stale.value }
+        }
+      }
+      return { ok: false, reason }
+    }
+  }
+
+  /**
+   * config 直下ファイルを作成 or 上書きし、結果 meta を返す(段階2b)。
+   * 段階2a と同じく If-Match は骨格のみ(ifMatch=undefined、version↔ETag 整合は段階2e)。
+   * 412(conflict)は DriveHttpError として throw され、呼出側で reason:'conflict' に変換する。
+   */
+  private async putConfigFile(
+    fileName: string,
+    logicalPath: string,
+    contentType: string,
+    body: string,
+    role: string,
+  ): Promise<ResourceMeta> {
+    const configId = await this.ensureConfigFolderId()
+    const existingId = await this.findChildId(configId, fileName, false)
+
+    const ifMatch: string | undefined = undefined // version↔ETag 整合は段階2e
+
+    let res: Response
+    if (!existingId) {
+      res = await this.driveCreateFile(configId, fileName, contentType, body, role)
+    } else {
+      res = await this.driveUpdateContent(existingId, contentType, body, ifMatch)
+    }
+
+    const json = (await res.json()) as {
+      id: string
+      modifiedTime?: string
+      version?: string
+    }
+    this.fileIdMap.set(logicalPath, json.id)
+
+    const meta: ResourceMeta = {
+      driveFileId: json.id,
+      modifiedTime: json.modifiedTime ?? '',
+      etag: json.version ?? '',
+      source: 'drive',
+    }
+    if (meta.etag) {
+      this.etagMap.set(logicalPath, meta.etag)
+    }
+    return meta
+  }
+
+  // -- profile.md(F4)フロントマター 相互変換(段階2b) ------
+  // フロントマターはフラットな key: value(文字列のみ)を想定。js-yaml 非依存の最小実装。
+
+  /** profile.md テキストを Profile({frontmatter, body})へ解析(壊れていても body として吸収)。 */
+  private parseProfileMd(text: string): Profile {
+    const frontmatter: Record<string, string> = {}
+    let body = text
+
+    const match = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/.exec(text)
+    if (match) {
+      body = match[2]
+      for (const line of match[1].split(/\r?\n/)) {
+        const idx = line.indexOf(':')
+        if (idx <= 0) {
+          continue
+        }
+        const key = line.slice(0, idx).trim()
+        let value = line.slice(idx + 1).trim()
+        if (
+          (value.startsWith('"') && value.endsWith('"')) ||
+          (value.startsWith("'") && value.endsWith("'"))
+        ) {
+          value = value.slice(1, -1)
+        }
+        if (key) {
+          frontmatter[key] = value
+        }
+      }
+    }
+
+    return { frontmatter, body }
+  }
+
+  /** Profile を profile.md テキスト(YAML フロントマター + body)へ直列化。 */
+  private serializeProfileMd(profile: Profile): string {
+    const lines: string[] = ['---']
+    for (const [key, raw] of Object.entries(profile.frontmatter)) {
+      if (raw === undefined || raw === null) {
+        continue
+      }
+      const value = String(raw)
+      // : # を含む / 前後空白がある値は安全のためダブルクォートで囲む
+      const needsQuote = /[:#]/.test(value) || value.trim() !== value
+      lines.push(`${key}: ${needsQuote ? JSON.stringify(value) : value}`)
+    }
+    lines.push('---')
+    return `${lines.join('\n')}\n${profile.body}`
   }
 
   // -- LWW 競合解決(骨格、本実装は段階2e) ------------------
