@@ -61,7 +61,7 @@ export const NG_CATEGORIES = [
 ];
 
 // 検査対象ディレクトリ(coaching.md ファイル)— CLI 用デフォルト
-export const DEFAULT_TARGET_DIRS = ['assets/characters', 'src/characters'];
+export const DEFAULT_TARGET_DIRS = ['assets/characters', 'src/characters', 'src/assets/characters'];
 
 // 説明・列挙行の除外パターン(coaching.md 内の「使わない」 リスト等)
 export const DEFAULT_LINE_EXCLUDE = [
