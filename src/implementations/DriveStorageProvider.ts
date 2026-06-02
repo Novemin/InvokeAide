@@ -54,6 +54,7 @@ import type {
 import type { StorageDeps, StorageProvider } from '@/interfaces/StorageProvider'
 import { IndexedDbCache } from './internal/IndexedDbCache'
 import { resolveCacheTtlMs } from './internal/cache-config'
+import { getBundledCharacterMd, getBundledCoachingMd } from '@/assets/characters/registry'
 
 // Drive API のエラーを種別つきで内部に運ぶ(呼出側で Result reason に変換)
 // 'conflict' は段階2a で追加(412 Precondition Failed = If-Match 不一致、段階2e で本処理)
@@ -419,25 +420,106 @@ export class DriveStorageProvider implements StorageProvider {
     }
   }
 
-  async loadCharacterMd(_id: string, _opts?: LoadOptions): Promise<LoadResult<string>> {
-    // 段階2: Drive 404 時に bundled アセット fallback(source:'bundled', C4)
-    throw new Error('DriveStorageProvider.loadCharacterMd() not implemented yet (段階2)')
+  // F6 <id>.md / F7 <id>.coaching.md(段階2c)。Drive 404 時は bundled アセット fallback。
+  async loadCharacterMd(id: string, opts?: LoadOptions): Promise<LoadResult<string>> {
+    return this.loadCharacterFile(
+      `${id}.md`,
+      `${DriveStorageProvider.P_CHARACTERS}/${id}.md`,
+      opts,
+      getBundledCharacterMd(id),
+    )
   }
 
-  async loadCoachingMd(_id: string, _opts?: LoadOptions): Promise<LoadResult<string>> {
-    throw new Error('DriveStorageProvider.loadCoachingMd() not implemented yet (段階2)')
+  async loadCoachingMd(id: string, opts?: LoadOptions): Promise<LoadResult<string>> {
+    return this.loadCharacterFile(
+      `${id}.coaching.md`,
+      `${DriveStorageProvider.P_CHARACTERS}/${id}.coaching.md`,
+      opts,
+      getBundledCoachingMd(id),
+    )
   }
 
-  async saveCharacterMd(_id: string, _md: string): Promise<SaveResult> {
-    throw new Error('DriveStorageProvider.saveCharacterMd() not implemented yet (段階2)')
+  async saveCharacterMd(id: string, md: string): Promise<SaveResult> {
+    return this.saveCharacterFile(`${id}.md`, `${DriveStorageProvider.P_CHARACTERS}/${id}.md`, md, 'F6')
   }
 
-  async saveCoachingMd(_id: string, _md: string): Promise<SaveResult> {
-    throw new Error('DriveStorageProvider.saveCoachingMd() not implemented yet (段階2)')
+  async saveCoachingMd(id: string, md: string): Promise<SaveResult> {
+    return this.saveCharacterFile(
+      `${id}.coaching.md`,
+      `${DriveStorageProvider.P_CHARACTERS}/${id}.coaching.md`,
+      md,
+      'F7',
+    )
   }
 
-  async diffBundledVsDrive(_id: string): Promise<CharacterDiffResult> {
-    throw new Error('DriveStorageProvider.diffBundledVsDrive() not implemented yet (段階2)')
+  /**
+   * 同梱版と Drive 版のキャラ MD を version で比較し、差分結果を返す(段階2c)。
+   * ★副作用なし(純粋な差分照会)。bundled_newer のときに Drive を上書きするかは呼出側の判断で、
+   *   上書きが必要なら applyBundledOverwrite(id) を呼ぶ(確定方針 ④: キャラ MD はアプリ側が正)。
+   * version は MD フロントマターの `version: <整数>`。CharacterDiffResult は string 表現。
+   */
+  async diffBundledVsDrive(id: string): Promise<CharacterDiffResult> {
+    const bundled = getBundledCharacterMd(id)
+    if (bundled === null) {
+      // 同梱に無い = ユーザー/Drive 固有キャラ。アプリ側から押し出す対象はない。
+      return { kind: 'drive_only' }
+    }
+    const bundledVersion = this.parseFrontmatterVersion(bundled) ?? 0
+
+    // Drive 側を fallback 無しで読む(存在しなければ driveText=null)
+    let driveText: string | null = null
+    try {
+      const logicalPath = `${DriveStorageProvider.P_CHARACTERS}/${id}.md`
+      const fileId = await this.resolveCharacterFileId(`${id}.md`, logicalPath)
+      if (fileId) {
+        const res = await this.driveApi(
+          'GET',
+          `${DriveStorageProvider.DRIVE_FILES}/${fileId}?alt=media`,
+        )
+        driveText = await res.text()
+      }
+    } catch (err) {
+      if (!(err instanceof DriveHttpError && err.kind === 'not_found')) {
+        // 取得不能(auth/network/rate_limit 等)→ 差分判定できない。安全側で 'same'(押し出さない)。
+        this.deps?.logger?.warn('DriveStorageProvider.diffBundledVsDrive: drive read failed', {
+          id,
+          err: this.serializeError(err),
+        })
+        return { kind: 'same' }
+      }
+      // not_found は driveText=null のまま継続
+    }
+
+    if (driveText === null) {
+      // Drive 未配置 → 同梱の方が新しい(driveVersion なし)
+      return { kind: 'bundled_newer', bundledVersion: String(bundledVersion) }
+    }
+
+    const driveVersion = this.parseFrontmatterVersion(driveText)
+    if (driveVersion === null || bundledVersion > driveVersion) {
+      // bundled が新しい(または Drive 側 version 不明)
+      return {
+        kind: 'bundled_newer',
+        bundledVersion: String(bundledVersion),
+        ...(driveVersion === null ? {} : { driveVersion: String(driveVersion) }),
+      }
+    }
+    return { kind: 'same' }
+  }
+
+  /**
+   * 同梱版キャラ MD で Drive 版を上書きする(contract 外のクラス固有メソッド、段階2c)。
+   * diffBundledVsDrive が bundled_newer を返したとき、呼出側がこれを呼んで反映する。
+   *   (副作用を diff から分離。確定方針 ④: キャラ MD はアプリ側が正、上書き OK)
+   * 同梱に該当 id が無い場合は何も上書きできないため reason:'unknown' を返す。
+   */
+  async applyBundledOverwrite(id: string): Promise<SaveResult> {
+    const bundled = getBundledCharacterMd(id)
+    if (bundled === null) {
+      this.deps?.logger?.warn('DriveStorageProvider.applyBundledOverwrite: no bundled md', { id })
+      return { ok: false, reason: 'unknown' }
+    }
+    return this.saveCharacterMd(id, bundled)
   }
 
   // -- プロファイル (F4 profile.md) — 段階2b -----------------
@@ -942,6 +1024,194 @@ export class DriveStorageProvider implements StorageProvider {
     }
     lines.push('---')
     return `${lines.join('\n')}\n${profile.body}`
+  }
+
+  // -- characters/ 配下ファイルの read / write + bundled fallback(段階2c) --
+
+  /**
+   * config/characters/ 直下の MD をキャッシュ経由で読む。
+   * Drive 未配置(resolve null または 404)時は bundled アセットを source:'bundled' で返す。
+   * bundled fallback はキャッシュに書かない(キャッシュは Drive 実体の写しのみに保つ)。
+   */
+  private async loadCharacterFile(
+    fileName: string,
+    logicalPath: string,
+    opts: LoadOptions | undefined,
+    bundled: string | null,
+  ): Promise<LoadResult<string>> {
+    const deps = this.deps
+    if (!deps) {
+      return { ok: false, reason: 'unknown' }
+    }
+
+    const forceFresh = opts?.forceFresh ?? false
+    const allowStaleCache = opts?.allowStaleCache ?? false
+
+    if (!forceFresh && this.cache) {
+      const hit = await this.cache.get<string>(logicalPath)
+      if (hit && (hit.fresh || allowStaleCache)) {
+        return { ok: true, value: hit.value, meta: { ...hit.meta, source: 'cache' } }
+      }
+    }
+
+    try {
+      const fileId = await this.resolveCharacterFileId(fileName, logicalPath)
+      if (!fileId) {
+        // Drive 未配置 → bundled fallback
+        return this.bundledResult(bundled)
+      }
+
+      const res = await this.driveApi(
+        'GET',
+        `${DriveStorageProvider.DRIVE_FILES}/${fileId}?alt=media`,
+      )
+      const text = await res.text()
+
+      const meta = await this.fetchFileMeta(fileId)
+      if (meta.etag) {
+        this.etagMap.set(logicalPath, meta.etag)
+      }
+      await this.cache?.set(logicalPath, text, meta)
+      return { ok: true, value: text, meta }
+    } catch (err) {
+      if (err instanceof DriveHttpError && err.kind === 'not_found') {
+        return this.bundledResult(bundled)
+      }
+      const reason = this.toLoadReason(err)
+      if (reason === 'offline' || reason === 'rate_limit') {
+        const stale = this.cache ? await this.cache.get<string>(logicalPath) : null
+        if (stale) {
+          return { ok: false, reason, cached: stale.value }
+        }
+      }
+      return { ok: false, reason }
+    }
+  }
+
+  /** bundled fallback を LoadResult へ。bundled が無ければ not_found。 */
+  private bundledResult(bundled: string | null): LoadResult<string> {
+    if (bundled === null) {
+      return { ok: false, reason: 'not_found' }
+    }
+    return {
+      ok: true,
+      value: bundled,
+      meta: { driveFileId: '', modifiedTime: '', etag: '', source: 'bundled' },
+    }
+  }
+
+  /** config/characters/ 直下の MD を Drive 保存(2b の config 保存と同型、etag 保持 + cache 更新)。 */
+  private async saveCharacterFile(
+    fileName: string,
+    logicalPath: string,
+    md: string,
+    role: string,
+  ): Promise<SaveResult> {
+    const deps = this.deps
+    if (!deps) {
+      return { ok: false, reason: 'unknown' }
+    }
+    try {
+      const meta = await this.putCharacterFile(fileName, logicalPath, md, role)
+      await this.cache?.set(logicalPath, md, meta)
+      return { ok: true, meta }
+    } catch (err) {
+      if (err instanceof DriveHttpError && err.kind === 'conflict') {
+        return { ok: false, reason: 'conflict' }
+      }
+      return { ok: false, reason: this.toSaveReason(err) }
+    }
+  }
+
+  /** MIYU_App_Data/config/characters を冪等確保し、その fileId を返す。 */
+  private async ensureCharactersFolderId(): Promise<string> {
+    const root = await this.ensureFolder(DriveStorageProvider.P_ROOT, 'MIYU_App_Data', 'root', 'F0')
+    const config = await this.ensureFolder(
+      DriveStorageProvider.P_CONFIG,
+      'config',
+      root.id,
+      'config',
+    )
+    const characters = await this.ensureFolder(
+      DriveStorageProvider.P_CHARACTERS,
+      'characters',
+      config.id,
+      'characters',
+    )
+    return characters.id
+  }
+
+  /** characters/ 直下ファイルの fileId 解決(読み取り専用、無ければ null)。 */
+  private async resolveCharacterFileId(
+    fileName: string,
+    logicalPath: string,
+  ): Promise<string | null> {
+    const cached = this.fileIdMap.get(logicalPath)
+    if (cached) {
+      return cached
+    }
+    const charsId = await this.findFolderId(['MIYU_App_Data', 'config', 'characters'])
+    if (!charsId) {
+      return null
+    }
+    const fileId = await this.findChildId(charsId, fileName, false)
+    if (fileId) {
+      this.fileIdMap.set(logicalPath, fileId)
+    }
+    return fileId
+  }
+
+  /** characters/ 直下ファイルを作成 or 上書きし meta を返す(putConfigFile の characters 版)。 */
+  private async putCharacterFile(
+    fileName: string,
+    logicalPath: string,
+    body: string,
+    role: string,
+  ): Promise<ResourceMeta> {
+    const charsId = await this.ensureCharactersFolderId()
+    const existingId = await this.findChildId(charsId, fileName, false)
+
+    const ifMatch: string | undefined = undefined // version↔ETag 整合は段階2e
+
+    let res: Response
+    if (!existingId) {
+      res = await this.driveCreateFile(charsId, fileName, 'text/markdown', body, role)
+    } else {
+      res = await this.driveUpdateContent(existingId, 'text/markdown', body, ifMatch)
+    }
+
+    const json = (await res.json()) as {
+      id: string
+      modifiedTime?: string
+      version?: string
+    }
+    this.fileIdMap.set(logicalPath, json.id)
+
+    const meta: ResourceMeta = {
+      driveFileId: json.id,
+      modifiedTime: json.modifiedTime ?? '',
+      etag: json.version ?? '',
+      source: 'drive',
+    }
+    if (meta.etag) {
+      this.etagMap.set(logicalPath, meta.etag)
+    }
+    return meta
+  }
+
+  /** MD フロントマターから `version: <整数>` を取り出す。無ければ null。 */
+  private parseFrontmatterVersion(text: string): number | null {
+    const match = /^---\r?\n([\s\S]*?)\r?\n---/.exec(text)
+    if (!match) {
+      return null
+    }
+    for (const line of match[1].split(/\r?\n/)) {
+      const m = /^\s*version\s*:\s*(\d+)\s*$/.exec(line)
+      if (m) {
+        return parseInt(m[1], 10)
+      }
+    }
+    return null
   }
 
   // -- LWW 競合解決(骨格、本実装は段階2e) ------------------
