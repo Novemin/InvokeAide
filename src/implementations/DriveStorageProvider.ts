@@ -91,6 +91,7 @@ export class DriveStorageProvider implements StorageProvider {
   private static readonly P_INDEX = 'MIYU_App_Data/config/index.json'
   private static readonly P_PROFILE = 'MIYU_App_Data/config/profile.md'
   private static readonly P_MANUAL = 'MIYU_App_Data/config/manual.md'
+  private static readonly P_ERRORS = 'MIYU_App_Data/logs/errors.md'
 
   private deps: StorageDeps | null = null
   // 論理パス → driveFileId の解決メモ(段階1は in-memory のみ。永続キャッシュは段階2)
@@ -569,21 +570,111 @@ export class DriveStorageProvider implements StorageProvider {
     )
   }
 
-  // -- 履歴 (F8 / F9、追記専用) — 段階2 ---------------------
-  async appendError(_entry: ErrorEntry): Promise<AppendResult> {
-    throw new Error('DriveStorageProvider.appendError() not implemented yet (段階2)')
+  // -- 履歴 (F8 conversations / F9 errors.md、追記専用) — 段階2d --
+  // 追記専用・キャッシュなし(TTL=null)。Drive にネイティブ追記が無いため read-modify-write。
+  // 末尾追記の競合検知(If-Match/412)は段階2e。
+
+  async appendError(entry: ErrorEntry): Promise<AppendResult> {
+    const deps = this.deps
+    if (!deps) {
+      return { ok: false, reason: 'unknown' }
+    }
+    try {
+      const block = this.formatErrorEntry(entry)
+      const logsId = await this.ensureLogsFolderId()
+      const meta = await this.appendToLogFile(
+        logsId,
+        'errors.md',
+        DriveStorageProvider.P_ERRORS,
+        block,
+        'F9',
+      )
+      return { ok: true, meta }
+    } catch (err) {
+      if (err instanceof DriveHttpError && err.kind === 'conflict') {
+        return { ok: false, reason: 'conflict' }
+      }
+      return { ok: false, reason: this.toSaveReason(err) }
+    }
   }
 
-  async archiveConversation(_date: IsoDate, _content: string): Promise<AppendResult> {
-    throw new Error('DriveStorageProvider.archiveConversation() not implemented yet (段階2)')
+  async archiveConversation(date: IsoDate, content: string): Promise<AppendResult> {
+    const deps = this.deps
+    if (!deps) {
+      return { ok: false, reason: 'unknown' }
+    }
+    try {
+      const fileName = this.conversationFileName(date)
+      const logicalPath = `${DriveStorageProvider.P_CONVERSATIONS}/${fileName}`
+      const convId = await this.ensureConversationsFolderId()
+      // 同日内の追加分は同ファイルへ末尾追記(設計 §4.7)
+      const meta = await this.appendToLogFile(convId, fileName, logicalPath, content, 'F8')
+      return { ok: true, meta }
+    } catch (err) {
+      if (err instanceof DriveHttpError && err.kind === 'conflict') {
+        return { ok: false, reason: 'conflict' }
+      }
+      return { ok: false, reason: this.toSaveReason(err) }
+    }
   }
 
-  async loadConversation(_date: IsoDate, _opts?: LoadOptions): Promise<LoadResult<string>> {
-    throw new Error('DriveStorageProvider.loadConversation() not implemented yet (段階2)')
+  async loadConversation(date: IsoDate, _opts?: LoadOptions): Promise<LoadResult<string>> {
+    const deps = this.deps
+    if (!deps) {
+      return { ok: false, reason: 'unknown' }
+    }
+    // 会話ログはキャッシュ対象外(TTL=null)。opts に関係なく常に Drive を読む。
+    try {
+      const fileName = this.conversationFileName(date)
+      const logicalPath = `${DriveStorageProvider.P_CONVERSATIONS}/${fileName}`
+      const fileId = await this.resolveConversationFileId(fileName, logicalPath)
+      if (!fileId) {
+        return { ok: false, reason: 'not_found' }
+      }
+      const res = await this.driveApi(
+        'GET',
+        `${DriveStorageProvider.DRIVE_FILES}/${fileId}?alt=media`,
+      )
+      const text = await res.text()
+      const meta = await this.fetchFileMeta(fileId)
+      return { ok: true, value: text, meta }
+    } catch (err) {
+      return { ok: false, reason: this.toLoadReason(err) }
+    }
   }
 
   async listConversationDates(): Promise<LoadResult<IsoDate[]>> {
-    throw new Error('DriveStorageProvider.listConversationDates() not implemented yet (段階2)')
+    const deps = this.deps
+    if (!deps) {
+      return { ok: false, reason: 'unknown' }
+    }
+    try {
+      const convId = await this.findFolderId(['MIYU_App_Data', 'logs', 'conversations'])
+      if (!convId) {
+        // フォルダ未作成 = まだ会話ログ無し。not_found ではなく空配列を返す。
+        return {
+          ok: true,
+          value: [],
+          meta: { driveFileId: '', modifiedTime: '', etag: '', source: 'drive' },
+        }
+      }
+      const children = await this.listChildren(convId)
+      const dates: IsoDate[] = []
+      for (const child of children) {
+        const m = /^会話ログ_(\d{4}-\d{2}-\d{2})\.md$/.exec(child.name)
+        if (m) {
+          dates.push(m[1])
+        }
+      }
+      dates.sort()
+      return {
+        ok: true,
+        value: dates,
+        meta: { driveFileId: convId, modifiedTime: '', etag: '', source: 'drive' },
+      }
+    } catch (err) {
+      return { ok: false, reason: this.toLoadReason(err) }
+    }
   }
 
   // -- 同期・オフライン — 段階2 -----------------------------
@@ -1212,6 +1303,137 @@ export class DriveStorageProvider implements StorageProvider {
       }
     }
     return null
+  }
+
+  // -- 履歴 (logs/) の read / append ヘルパー(段階2d) -------
+
+  /** ErrorEntry を errors.md 追記用の markdown ブロックへ整形。 */
+  private formatErrorEntry(entry: ErrorEntry): string {
+    const lines: string[] = []
+    lines.push(`## [${entry.occurredAt.toISOString()}] ${entry.category} / ${entry.kind}`)
+    lines.push(entry.message)
+    if (entry.context !== undefined) {
+      lines.push(`- context: ${JSON.stringify(entry.context)}`)
+    }
+    if (entry.resolution !== undefined) {
+      lines.push(`- resolution: ${entry.resolution}`)
+    }
+    if (entry.relatedDoc !== undefined) {
+      lines.push(`- relatedDoc: ${entry.relatedDoc}`)
+    }
+    return lines.join('\n')
+  }
+
+  /** 会話ログのファイル名(F8: 会話ログ_YYYY-MM-DD.md)。 */
+  private conversationFileName(date: IsoDate): string {
+    return `会話ログ_${date}.md`
+  }
+
+  /** MIYU_App_Data/logs を冪等確保し fileId を返す。 */
+  private async ensureLogsFolderId(): Promise<string> {
+    const root = await this.ensureFolder(DriveStorageProvider.P_ROOT, 'MIYU_App_Data', 'root', 'F0')
+    const logs = await this.ensureFolder(DriveStorageProvider.P_LOGS, 'logs', root.id, 'logs')
+    return logs.id
+  }
+
+  /** MIYU_App_Data/logs/conversations を冪等確保し fileId を返す。 */
+  private async ensureConversationsFolderId(): Promise<string> {
+    const logsId = await this.ensureLogsFolderId()
+    const conv = await this.ensureFolder(
+      DriveStorageProvider.P_CONVERSATIONS,
+      'conversations',
+      logsId,
+      'conversations',
+    )
+    return conv.id
+  }
+
+  /** conversations/ 直下ファイルの fileId 解決(読み取り専用、無ければ null)。 */
+  private async resolveConversationFileId(
+    fileName: string,
+    logicalPath: string,
+  ): Promise<string | null> {
+    const cached = this.fileIdMap.get(logicalPath)
+    if (cached) {
+      return cached
+    }
+    const convId = await this.findFolderId(['MIYU_App_Data', 'logs', 'conversations'])
+    if (!convId) {
+      return null
+    }
+    const fileId = await this.findChildId(convId, fileName, false)
+    if (fileId) {
+      this.fileIdMap.set(logicalPath, fileId)
+    }
+    return fileId
+  }
+
+  /**
+   * 追記専用ファイルへ block を末尾追記する(read-modify-write、Drive にネイティブ追記が無いため)。
+   * 既存が無ければ新規作成。競合検知(If-Match/412)は段階2e。
+   */
+  private async appendToLogFile(
+    parentFolderId: string,
+    fileName: string,
+    logicalPath: string,
+    block: string,
+    role: string,
+  ): Promise<ResourceMeta> {
+    const existingId = await this.findChildId(parentFolderId, fileName, false)
+
+    let res: Response
+    if (!existingId) {
+      res = await this.driveCreateFile(parentFolderId, fileName, 'text/markdown', block, role)
+    } else {
+      const cur = await this.driveApi(
+        'GET',
+        `${DriveStorageProvider.DRIVE_FILES}/${existingId}?alt=media`,
+      )
+      const curText = await cur.text()
+      const merged = curText.length > 0 ? `${curText}\n${block}` : block
+      res = await this.driveUpdateContent(existingId, 'text/markdown', merged)
+    }
+
+    const json = (await res.json()) as {
+      id: string
+      modifiedTime?: string
+      version?: string
+    }
+    this.fileIdMap.set(logicalPath, json.id)
+
+    const meta: ResourceMeta = {
+      driveFileId: json.id,
+      modifiedTime: json.modifiedTime ?? '',
+      etag: json.version ?? '',
+      source: 'drive',
+    }
+    if (meta.etag) {
+      this.etagMap.set(logicalPath, meta.etag)
+    }
+    return meta
+  }
+
+  /** 親フォルダ直下の全ファイルを列挙(ページネーション対応)。 */
+  private async listChildren(parentId: string): Promise<Array<{ id: string; name: string }>> {
+    const out: Array<{ id: string; name: string }> = []
+    let pageToken: string | undefined
+    do {
+      const q = encodeURIComponent(`'${parentId}' in parents and trashed=false`)
+      let url = `${DriveStorageProvider.DRIVE_FILES}?q=${q}&fields=nextPageToken,files(id,name)&spaces=drive&pageSize=100`
+      if (pageToken) {
+        url += `&pageToken=${encodeURIComponent(pageToken)}`
+      }
+      const res = await this.driveApi('GET', url)
+      const json = (await res.json()) as {
+        nextPageToken?: string
+        files?: Array<{ id: string; name: string }>
+      }
+      if (json.files) {
+        out.push(...json.files)
+      }
+      pageToken = json.nextPageToken
+    } while (pageToken)
+    return out
   }
 
   // -- LWW 競合解決(骨格、本実装は段階2e) ------------------
