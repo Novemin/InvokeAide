@@ -14,12 +14,19 @@
 //     - saveSettings     : settings.json を Drive へ保存(★LWW 競合検知無し、初回は遅延作成)
 //     - 内部: driveApi / findChild / ensureFolder / resolve 系
 //
-//   ▼▼ 段階2に回す(別指示文):
-//     - IndexedDbCache(キャッシュ層) / PendingQueue(オフライン保存待ち) /
-//       ConflictResolver(LWW 競合解決、If-Match/412/handleConflict) … src/implementations/internal/
-//     - bundled アセット fallback(loadCharacterMd 等の 404 fallback、source:'bundled')
-//     - watch 系(watchSettings / watchSyncState / onConflict)、flushPending、getSyncState
-//     - キャラ/プロファイル/マニュアル/履歴の各 load/save(下記スケルトン据え置き)
+//   ▼ 段階2a(本コミット)で追加:
+//     - IndexedDbCache(キャッシュ層、src/implementations/internal/)を initialize で生成・dispose で close
+//     - loadSettings をキャッシュ経由に改修(forceFresh / allowStaleCache 経路、TTL は cache-config)
+//     - saveSettings に If-Match / 412 / handleConflict の「骨格」を配線(本実装は段階2e)
+//     - ensureLayout に archive/ と conflicts/ フォルダ作成を追加
+//     - etagMap フィールド追加(段階2e の LWW で消費)
+//
+//   ▼▼ 段階2(以降の別指示文)に回す:
+//     - PendingQueue(オフライン保存待ち、段階2e) /
+//       ConflictResolver(LWW 競合解決、If-Match/412/handleConflict 本実装、段階2e) … internal/
+//     - bundled アセット fallback(loadCharacterMd 等の 404 fallback、source:'bundled'、段階2c)
+//     - watch 系(watchSettings / watchSyncState / onConflict)、flushPending、getSyncState(段階2f)
+//     - キャラ/プロファイル/マニュアル/履歴の各 load/save(段階2b/2c/2d、下記スケルトン据え置き)
 //   依存先(完成済): IndexedDbSecretStore / GoogleAuthProvider
 
 import type {
@@ -45,12 +52,17 @@ import type {
   Settings,
 } from '@/interfaces/domain'
 import type { StorageDeps, StorageProvider } from '@/interfaces/StorageProvider'
+import { IndexedDbCache } from './internal/IndexedDbCache'
+import { resolveCacheTtlMs } from './internal/cache-config'
 
 // Drive API のエラーを種別つきで内部に運ぶ(呼出側で Result reason に変換)
+// 'conflict' は段階2a で追加(412 Precondition Failed = If-Match 不一致、段階2e で本処理)
+type DriveErrorKind = 'auth' | 'rate_limit' | 'network' | 'not_found' | 'conflict' | 'http'
+
 class DriveHttpError extends Error {
-  readonly kind: 'auth' | 'rate_limit' | 'network' | 'not_found' | 'http'
+  readonly kind: DriveErrorKind
   readonly status?: number
-  constructor(kind: 'auth' | 'rate_limit' | 'network' | 'not_found' | 'http', status?: number) {
+  constructor(kind: DriveErrorKind, status?: number) {
     super(`DriveHttpError:${kind}${status != null ? `:${status}` : ''}`)
     this.kind = kind
     this.status = status
@@ -70,6 +82,8 @@ export class DriveStorageProvider implements StorageProvider {
   private static readonly P_ROOT = 'MIYU_App_Data'
   private static readonly P_CONFIG = 'MIYU_App_Data/config'
   private static readonly P_CHARACTERS = 'MIYU_App_Data/config/characters'
+  private static readonly P_ARCHIVE = 'MIYU_App_Data/config/archive'
+  private static readonly P_CONFLICTS = 'MIYU_App_Data/config/conflicts'
   private static readonly P_LOGS = 'MIYU_App_Data/logs'
   private static readonly P_CONVERSATIONS = 'MIYU_App_Data/logs/conversations'
   private static readonly P_SETTINGS = 'MIYU_App_Data/config/settings.json'
@@ -77,6 +91,10 @@ export class DriveStorageProvider implements StorageProvider {
   private deps: StorageDeps | null = null
   // 論理パス → driveFileId の解決メモ(段階1は in-memory のみ。永続キャッシュは段階2)
   private fileIdMap: Map<string, string> = new Map()
+  // 論理パス → 最後に観測した etag(段階2e の LWW If-Match 競合検知で消費)
+  private etagMap: Map<string, string> = new Map()
+  // ローカルキャッシュ層(段階2a)。initialize で生成、利用不可環境では null(キャッシュ無し劣化運用)
+  private cache: IndexedDbCache | null = null
 
   // -- ライフサイクル ---------------------------------------
 
@@ -102,7 +120,25 @@ export class DriveStorageProvider implements StorageProvider {
       return { ok: false, reason: 'unknown' }
     }
 
-    // 3. 段階1ではキャッシュ / PendingQueue の初期化は無し(段階2で IndexedDbCache 等を復元)
+    // 3. キャッシュ層を初期化(段階2a)。
+    //    IndexedDB 利用不可(Private Browsing 等)でも致命とせず、Drive 直アクセスで継続する
+    //    (キャッシュ無し劣化運用)。InitResult の reason は auth/drive 系のみのため ok:true を返す。
+    //    PendingQueue 復元は段階2e。
+    const cache = new IndexedDbCache({
+      clock: deps.clock,
+      logger: deps.logger,
+      ttlResolver: resolveCacheTtlMs,
+    })
+    try {
+      await cache.initialize()
+      this.cache = cache
+    } catch (err) {
+      deps.logger?.warn('DriveStorageProvider.initialize: cache unavailable, running without cache', {
+        err: this.serializeError(err),
+      })
+      this.cache = null
+    }
+
     return { ok: true }
   }
 
@@ -134,6 +170,24 @@ export class DriveStorageProvider implements StorageProvider {
       )
       track(characters, DriveStorageProvider.P_CHARACTERS)
 
+      // archive/ と conflicts/ は config 直下(レイアウト §3.4)。
+      // conflicts/ は段階2e の LWW 競合退避先になるため、土台のうちに作っておく。
+      const archive = await this.ensureFolder(
+        DriveStorageProvider.P_ARCHIVE,
+        'archive',
+        config.id,
+        'archive',
+      )
+      track(archive, DriveStorageProvider.P_ARCHIVE)
+
+      const conflicts = await this.ensureFolder(
+        DriveStorageProvider.P_CONFLICTS,
+        'conflicts',
+        config.id,
+        'conflicts',
+      )
+      track(conflicts, DriveStorageProvider.P_CONFLICTS)
+
       const logs = await this.ensureFolder(DriveStorageProvider.P_LOGS, 'logs', root.id, 'logs')
       track(logs, DriveStorageProvider.P_LOGS)
 
@@ -155,19 +209,45 @@ export class DriveStorageProvider implements StorageProvider {
   }
 
   async dispose(): Promise<void> {
-    // 段階1は最小実装: 内部状態をクリア(段階2でキャッシュ flush / watcher 解除を追加)
+    // 段階2a: キャッシュを flush(現状 write-through で即返り)してから接続を閉じる。
+    //   段階2e で PendingQueue flush / watcher 解除を追加する。
+    if (this.cache) {
+      try {
+        await this.cache.flush()
+      } catch (err) {
+        this.deps?.logger?.warn('DriveStorageProvider.dispose: cache flush failed', {
+          err: this.serializeError(err),
+        })
+      }
+      this.cache.close()
+      this.cache = null
+    }
     this.fileIdMap.clear()
+    this.etagMap.clear()
     this.deps = null
   }
 
   // -- 設定 (F3 settings.json) ------------------------------
 
-  async loadSettings(_opts?: LoadOptions): Promise<LoadResult<Settings>> {
+  async loadSettings(opts?: LoadOptions): Promise<LoadResult<Settings>> {
     const deps = this.deps
     if (!deps) {
       return { ok: false, reason: 'unknown' }
     }
-    // ★段階1: キャッシュ無し(cache hit 経路 / allowStaleCache / forceFresh は段階2で作り込む)
+
+    const forceFresh = opts?.forceFresh ?? false
+    const allowStaleCache = opts?.allowStaleCache ?? false
+
+    // 1. キャッシュ参照(段階2a)。forceFresh 時はスキップして必ず Drive を見る。
+    //    fresh(TTL 内)、または allowStaleCache 指定時の stale ヒットを採用。
+    if (!forceFresh && this.cache) {
+      const hit = await this.cache.get<Settings>(DriveStorageProvider.P_SETTINGS)
+      if (hit && (hit.fresh || allowStaleCache)) {
+        return { ok: true, value: hit.value, meta: { ...hit.meta, source: 'cache' } }
+      }
+    }
+
+    // 2. Drive 取得
     try {
       const fileId = await this.resolveSettingsFileId()
       if (!fileId) {
@@ -188,9 +268,24 @@ export class DriveStorageProvider implements StorageProvider {
       }
 
       const meta = await this.fetchFileMeta(fileId)
+      // etag を保持(段階2e の If-Match)、キャッシュを更新
+      if (meta.etag) {
+        this.etagMap.set(DriveStorageProvider.P_SETTINGS, meta.etag)
+      }
+      await this.cache?.set(DriveStorageProvider.P_SETTINGS, value, meta)
       return { ok: true, value, meta }
     } catch (err) {
-      return { ok: false, reason: this.toLoadReason(err) }
+      const reason = this.toLoadReason(err)
+      // offline / rate_limit 時は最後にキャッシュした値を cached として添える(§3.5)
+      if (reason === 'offline' || reason === 'rate_limit') {
+        const stale = this.cache
+          ? await this.cache.get<Settings>(DriveStorageProvider.P_SETTINGS)
+          : null
+        if (stale) {
+          return { ok: false, reason, cached: stale.value }
+        }
+      }
+      return { ok: false, reason }
     }
   }
 
@@ -212,13 +307,19 @@ export class DriveStorageProvider implements StorageProvider {
       const configId = await this.ensureConfigFolderId()
       const existingId = await this.findChildId(configId, 'settings.json', false)
 
-      // ★段階2: ここに LWW 競合検知(読込時 etag を保持 → If-Match 付き PATCH → 412 で handleConflict)を足す。
-      //         段階1は素直に作成 / 上書きする。
+      // 段階2a: LWW 競合検知の「骨格」を配線する。
+      //   読込時に保持した etag を If-Match に載せ、412 を検知して handleConflict に流す——
+      //   という本実装は段階2e。ここでは ifMatch の配線・412→reason:'conflict' の検知のみ用意する。
+      //   ★ 現状 etagMap の値は Drive の version 番号であり、HTTP If-Match が期待する ETag とは別物。
+      //     version を If-Match に載せると正常更新まで 412 で弾かれかねないため、2a では
+      //     ライブ経路に載せない(ifMatch=undefined)。version↔ETag の整合は段階2e の設計判断(報告参照)。
+      const ifMatch: string | undefined = undefined
+
       let res: Response
       if (!existingId) {
         res = await this.driveCreateFile(configId, 'settings.json', 'application/json', body, 'F3')
       } else {
-        res = await this.driveUpdateContent(existingId, 'application/json', body)
+        res = await this.driveUpdateContent(existingId, 'application/json', body, ifMatch)
       }
 
       const json = (await res.json()) as {
@@ -234,8 +335,30 @@ export class DriveStorageProvider implements StorageProvider {
         etag: json.version ?? '',
         source: 'drive',
       }
+      // etag を保持(段階2e の If-Match)、キャッシュを更新
+      if (meta.etag) {
+        this.etagMap.set(DriveStorageProvider.P_SETTINGS, meta.etag)
+      }
+      await this.cache?.set(DriveStorageProvider.P_SETTINGS, toSave, meta)
       return { ok: true, meta }
     } catch (err) {
+      // 412 競合の検知(段階2a)。本処理 = ours を conflicts/ に退避 + ConflictEvent 発火は
+      //   段階2e。骨格として handleConflict の呼出口だけ配線しておく(中身は未実装で throw、
+      //   ここで握って warn に留め、契約どおり reason:'conflict' を返す)。
+      if (err instanceof DriveHttpError && err.kind === 'conflict') {
+        try {
+          await this.handleConflict(
+            DriveStorageProvider.P_SETTINGS,
+            { modifiedTime: '', etag: this.etagMap.get(DriveStorageProvider.P_SETTINGS) ?? '' },
+            { modifiedTime: '', etag: '' },
+          )
+        } catch (conflictErr) {
+          deps.logger?.warn('DriveStorageProvider.saveSettings: handleConflict pending (段階2e)', {
+            err: this.serializeError(conflictErr),
+          })
+        }
+        return { ok: false, reason: 'conflict' }
+      }
       return { ok: false, reason: this.toSaveReason(err) }
     }
   }
@@ -331,13 +454,16 @@ export class DriveStorageProvider implements StorageProvider {
   private async driveApi(
     method: string,
     url: string,
-    opts?: { body?: BodyInit; contentType?: string },
+    opts?: { body?: BodyInit; contentType?: string; headers?: Record<string, string> },
   ): Promise<Response> {
     const token = await this.acquireAccessToken()
 
     const headers: Record<string, string> = { Authorization: `Bearer ${token}` }
     if (opts?.contentType) {
       headers['Content-Type'] = opts.contentType
+    }
+    if (opts?.headers) {
+      Object.assign(headers, opts.headers)
     }
 
     let res: Response
@@ -374,6 +500,10 @@ export class DriveStorageProvider implements StorageProvider {
     }
     if (status === 404) {
       return new DriveHttpError('not_found', status)
+    }
+    // 412 Precondition Failed = If-Match 不一致 = LWW 競合(段階2e で本処理)
+    if (status === 412) {
+      return new DriveHttpError('conflict', status)
     }
     return new DriveHttpError('http', status)
   }
@@ -524,14 +654,20 @@ export class DriveStorageProvider implements StorageProvider {
     })
   }
 
-  /** 既存ファイルの内容を置換(PATCH media。appProperties は据え置き) */
+  /**
+   * 既存ファイルの内容を置換(PATCH media。appProperties は据え置き)。
+   * 段階2a: ifMatch 指定時は If-Match ヘッダで楽観的ロックを掛ける(不一致は 412 = 'conflict')。
+   *   現状は呼出側が ifMatch を載せていない(version↔ETag 整合が段階2e の宿題)。
+   */
   private async driveUpdateContent(
     fileId: string,
     contentType: string,
     content: string,
+    ifMatch?: string,
   ): Promise<Response> {
     const url = `${DriveStorageProvider.DRIVE_UPLOAD}/${fileId}?uploadType=media&fields=id,modifiedTime,version`
-    return this.driveApi('PATCH', url, { body: content, contentType })
+    const headers = ifMatch ? { 'If-Match': ifMatch } : undefined
+    return this.driveApi('PATCH', url, { body: content, contentType, headers })
   }
 
   /** ファイルの modifiedTime / version(etag 相当)を取得 */
@@ -550,6 +686,23 @@ export class DriveStorageProvider implements StorageProvider {
       etag: json.version ?? json.md5Checksum ?? '',
       source: 'drive',
     }
+  }
+
+  // -- LWW 競合解決(骨格、本実装は段階2e) ------------------
+
+  /**
+   * LWW 競合(412)の解決。段階2e で internal/ConflictResolver に委譲して本実装する:
+   *   1. ours(ローカル保存待ちだった内容)を config/conflicts/<timestamp>-<file> に退避
+   *   2. ConflictEvent(retainedPath / occurredAt / ours / theirs)を組み立てて発火
+   *   3. キャッシュを theirs(Drive 側)で更新、watchers に theirs を通知
+   * 段階2a では未実装。saveSettings の 412 検知は reason:'conflict' を返すに留める。
+   */
+  private async handleConflict(
+    _logicalPath: string,
+    _ours: { modifiedTime: string; etag: string },
+    _theirs: { modifiedTime: string; etag: string },
+  ): Promise<void> {
+    throw new Error('DriveStorageProvider.handleConflict() not implemented yet (段階2e)')
   }
 
   // -- エラー → Result reason 変換 ---------------------------
