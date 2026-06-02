@@ -25,7 +25,7 @@ export const BUNDLED_CHARACTERS: CharacterEntry[] = [
     displayName: 'ギャル秘書 MIYU',
     characterMdPath: 'config/characters/miyu.md',
     coachingMdPath: 'config/characters/miyu.coaching.md',
-    voicevoxSpeakerId: 8, // 春日部つむぎ(要実機確認)
+    voicevoxSpeakerId: 8, // 春日部つむぎ ノーマル(実機確認済み 2026-06-02)
     voicevoxCreditLine: 'VOICEVOX:春日部つむぎ',
     description:
       'みゆだよ、明るく軽やかなノリで、予定もタスクも人間関係もまとめて先読みするギャル系天才秘書です。',
@@ -36,7 +36,7 @@ export const BUNDLED_CHARACTERS: CharacterEntry[] = [
     displayName: 'コーチング秘書 兄ちゃん',
     characterMdPath: 'config/characters/bro.md',
     coachingMdPath: 'config/characters/bro.coaching.md',
-    voicevoxSpeakerId: 52, // 雀松朱司(要実機確認)
+    voicevoxSpeakerId: 52, // 雀松朱司 ノーマル(実機確認済み 2026-06-02)
     voicevoxCreditLine: 'VOICEVOX:雀松朱司',
     description:
       '兄ちゃんだ、あなたの可能性を信じ、行動力と自信に火をつける情熱型のコーチング秘書だ。',
@@ -47,7 +47,7 @@ export const BUNDLED_CHARACTERS: CharacterEntry[] = [
     displayName: '熟練コンシェルジュ秘書 セバスチャン',
     characterMdPath: 'config/characters/sebastian.md',
     coachingMdPath: 'config/characters/sebastian.coaching.md',
-    voicevoxSpeakerId: 21, // 剣崎雌雄(要実機確認)
+    voicevoxSpeakerId: 21, // 剣崎雌雄 ノーマル(実機確認済み 2026-06-02)
     voicevoxCreditLine: 'VOICEVOX:剣崎雌雄',
     description:
       'セバスチャンでございます、長年の経験と冷静な判断で、あなたが進むべき道を静かに整えるベテランコンシェルジュです。',
