@@ -54,6 +54,8 @@ import type {
 import type { StorageDeps, StorageProvider } from '@/interfaces/StorageProvider'
 import { IndexedDbCache } from './internal/IndexedDbCache'
 import { resolveCacheTtlMs } from './internal/cache-config'
+import { PendingQueueStore } from './internal/PendingQueueStore'
+import { ConflictResolver } from './internal/ConflictResolver'
 import { getBundledCharacterMd, getBundledCoachingMd } from '@/assets/characters/registry'
 
 // Drive API のエラーを種別つきで内部に運ぶ(呼出側で Result reason に変換)
@@ -100,6 +102,14 @@ export class DriveStorageProvider implements StorageProvider {
   private etagMap: Map<string, string> = new Map()
   // ローカルキャッシュ層(段階2a)。initialize で生成、利用不可環境では null(キャッシュ無し劣化運用)
   private cache: IndexedDbCache | null = null
+  // オフライン書込みキュー(段階2e)。フィールド初期化子で保持(コンストラクタ不要)。
+  private readonly pendingQueue = new PendingQueueStore()
+  // version比較によるread-before-write楽観ロックの判定器(段階2e)。
+  private readonly conflictResolver = new ConflictResolver()
+  // キュー件数の in-memory ミラー。同期 getSyncState 用(getAll は IndexedDB=非同期で待てないため)。
+  private pendingCount = 0
+  // 最後にフラッシュがクリーンに捌けた時刻(RFC3339)。getSyncState.lastSyncedAt 用。
+  private lastSyncedAt: string | null = null
 
   // -- ライフサイクル ---------------------------------------
 
@@ -142,6 +152,19 @@ export class DriveStorageProvider implements StorageProvider {
         err: this.serializeError(err),
       })
       this.cache = null
+    }
+
+    // 4. PendingQueue の件数を同期 getSyncState 用に復元(段階2e)。
+    //    getAll は IndexedDB=非同期のため initialize 時に一度だけ読み、pendingCount にミラーする。
+    //    IndexedDB 利用不可環境では 0 のまま(キュー無し劣化運用)。
+    try {
+      const pending = await this.pendingQueue.getAll()
+      this.pendingCount = pending.length
+    } catch (err) {
+      deps.logger?.warn('DriveStorageProvider.initialize: pending queue restore skipped', {
+        err: this.serializeError(err),
+      })
+      this.pendingCount = 0
     }
 
     return { ok: true }
@@ -308,6 +331,11 @@ export class DriveStorageProvider implements StorageProvider {
       }
       const body = JSON.stringify(toSave, null, 2)
 
+      // オフライン時は Drive に書かずキューへ積む(段階2e)。content は実際に書く body。
+      if (!navigator.onLine) {
+        return await this.enqueueOffline(DriveStorageProvider.P_SETTINGS, body)
+      }
+
       // config フォルダを冪等確保(段階1では saveSettings 初回に settings.json を遅延作成)
       const configId = await this.ensureConfigFolderId()
       const existingId = await this.findChildId(configId, 'settings.json', false)
@@ -403,6 +431,12 @@ export class DriveStorageProvider implements StorageProvider {
         lastUpdated: deps.clock.now().toISOString(),
       }
       const body = JSON.stringify(toSave, null, 2)
+
+      // オフライン時は Drive に書かずキューへ積む(段階2e)。
+      if (!navigator.onLine) {
+        return await this.enqueueOffline(DriveStorageProvider.P_INDEX, body)
+      }
+
       const meta = await this.putConfigFile(
         'index.json',
         DriveStorageProvider.P_INDEX,
@@ -542,6 +576,12 @@ export class DriveStorageProvider implements StorageProvider {
     }
     try {
       const body = this.serializeProfileMd(profile)
+
+      // オフライン時は Drive に書かずキューへ積む(段階2e)。
+      if (!navigator.onLine) {
+        return await this.enqueueOffline(DriveStorageProvider.P_PROFILE, body)
+      }
+
       const meta = await this.putConfigFile(
         'profile.md',
         DriveStorageProvider.P_PROFILE,
@@ -679,7 +719,15 @@ export class DriveStorageProvider implements StorageProvider {
 
   // -- 同期・オフライン — 段階2 -----------------------------
   getSyncState(): SyncState {
-    throw new Error('DriveStorageProvider.getSyncState() not implemented yet (段階2)')
+    return {
+      online: navigator.onLine,
+      pendingWrites: this.pendingCount,
+      lastSyncedAt: this.lastSyncedAt,
+      // 競合レビュー待ち件数は conflicts/ 退避(段階2e の append/handleConflict 本実装)とセット。
+      // 本ステップ(2e-4)では未配線のため 0。
+      conflictsAwaitingReview: 0,
+      authStage: this.deps?.auth.currentStage() ?? 'unauth',
+    }
   }
 
   watchSyncState(_cb: WatchCallback<SyncState>): Unsubscribe {
@@ -687,7 +735,62 @@ export class DriveStorageProvider implements StorageProvider {
   }
 
   async flushPending(): Promise<FlushResult> {
-    throw new Error('DriveStorageProvider.flushPending() not implemented yet (段階2)')
+    const entries = await this.pendingQueue.getAll()
+    let flushed = 0
+    let skipped = 0
+
+    for (const entry of entries) {
+      // logicalPath から fileId を解決(汎用 resolver は作らず per-resource を振り分け)。
+      const fileId = await this.resolveFileIdForPath(entry.logicalPath)
+      if (!fileId) {
+        // fileId 未解決(対象外パス / Drive 上に未作成 等)。破棄してキューから除く。
+        skipped++
+        await this.pendingQueue.remove(entry.id)
+        this.pendingCount = Math.max(0, this.pendingCount - 1)
+        continue
+      }
+
+      // version比較によるread-before-write楽観ロック(2e-3)。
+      const result = await this.conflictResolver.resolve(
+        fileId,
+        entry.knownVersion,
+        entry.enqueuedAt,
+        async (fid) => {
+          const res = await this.driveApi(
+            'GET',
+            `${DriveStorageProvider.DRIVE_FILES}/${fid}?fields=version`,
+          )
+          const json = (await res.json()) as { version?: string }
+          return json.version ?? '0'
+        },
+      )
+
+      if (result.action === 'write') {
+        await this.writeContentForPath(entry.logicalPath, entry.content)
+        await this.pendingQueue.remove(entry.id)
+        flushed++
+        this.pendingCount = Math.max(0, this.pendingCount - 1)
+      } else if (result.action === 'skip') {
+        // LWW で負け(Drive 側が新しい)。破棄する。
+        console.warn(`[flushPending] skipped: ${entry.logicalPath} - ${result.reason}`)
+        await this.pendingQueue.remove(entry.id)
+        skipped++
+        this.pendingCount = Math.max(0, this.pendingCount - 1)
+      } else {
+        // error: version 取得失敗等。キューから除去せず次回フラッシュでリトライ(pendingCount 据え置き)。
+        console.warn(`[flushPending] error: ${entry.logicalPath} - ${result.reason}`)
+      }
+    }
+
+    const ok = entries.length === 0 || flushed + skipped === entries.length
+    if (ok) {
+      // クリーンに捌けたタイミングを最終同期時刻として記録(SyncState.lastSyncedAt 用)。
+      // 契約の lastSyncedAt は string|null のため Date.now() の数値ではなく RFC3339 文字列で持つ。
+      this.lastSyncedAt = this.deps?.clock.now().toISOString() ?? this.lastSyncedAt
+      return { ok: true, flushed, skipped }
+    }
+    // error が残存(リトライ対象あり)。reason は契約の許容値 'partial' を使う(詳細は warn 済)。
+    return { ok: false, reason: 'partial', flushed }
   }
 
   onConflict(_cb: (event: ConflictEvent) => void): Unsubscribe {
@@ -1203,6 +1306,11 @@ export class DriveStorageProvider implements StorageProvider {
       return { ok: false, reason: 'unknown' }
     }
     try {
+      // オフライン時は Drive に書かずキューへ積む(段階2e)。saveCharacterMd / saveCoachingMd
+      // 双方がここを通るため、両 overwrite 系を1箇所のオフライン分岐でカバーする。
+      if (!navigator.onLine) {
+        return await this.enqueueOffline(logicalPath, md)
+      }
       const meta = await this.putCharacterFile(fileName, logicalPath, md, role)
       await this.cache?.set(logicalPath, md, meta)
       return { ok: true, meta }
@@ -1288,6 +1396,93 @@ export class DriveStorageProvider implements StorageProvider {
       this.etagMap.set(logicalPath, meta.etag)
     }
     return meta
+  }
+
+  // -- オフライン書込みキュー / フラッシュ補助(段階2e) -------
+
+  /**
+   * オフライン書込みをキューへ積み、pendingCount を進めて pending 結果を返す。
+   * overwrite 系 save の先頭分岐から呼ぶ。content は実際に Drive へ書く予定の文字列、
+   * knownVersion は積んだ時点で観測している version(無ければ '0')。
+   */
+  private async enqueueOffline(logicalPath: string, content: string): Promise<SaveResult> {
+    const knownVersion = this.etagMap.get(logicalPath) ?? '0'
+    await this.pendingQueue.enqueue({
+      logicalPath,
+      content,
+      enqueuedAt: Date.now(),
+      knownVersion,
+    })
+    this.pendingCount++
+    // Drive へはまだ書いていない。契約の pending フラグで「キュー済・同期待ち」を伝える。
+    return { ok: false, reason: 'offline', pending: true }
+  }
+
+  /**
+   * 論理パスから fileId を解決する(flushPending 用)。汎用 resolver は新設せず、
+   * 既存の per-resource resolver を logicalPath で振り分ける(2e-4 確定方針: ディスパッチ表なし)。
+   * overwrite 系5種(settings / profile / index / characters 配下 md)のみ対応。
+   */
+  private async resolveFileIdForPath(logicalPath: string): Promise<string | null> {
+    switch (logicalPath) {
+      case DriveStorageProvider.P_SETTINGS:
+        return this.resolveSettingsFileId()
+      case DriveStorageProvider.P_PROFILE:
+        return this.resolveConfigChildFileId('profile.md', DriveStorageProvider.P_PROFILE)
+      case DriveStorageProvider.P_INDEX:
+        return this.resolveConfigChildFileId('index.json', DriveStorageProvider.P_INDEX)
+      default:
+        if (logicalPath.startsWith(`${DriveStorageProvider.P_CHARACTERS}/`)) {
+          const fileName = logicalPath.slice(DriveStorageProvider.P_CHARACTERS.length + 1)
+          return this.resolveCharacterFileId(fileName, logicalPath)
+        }
+        return null
+    }
+  }
+
+  /**
+   * 論理パスに content を上書き書込みする(flushPending 用)。resolveFileIdForPath と同じ振り分けで
+   * 既存の writer(putConfigFile / putCharacterFile)を呼ぶ。append 系は 2e-4 スコープ外。
+   */
+  private async writeContentForPath(logicalPath: string, content: string): Promise<void> {
+    switch (logicalPath) {
+      case DriveStorageProvider.P_SETTINGS:
+        await this.putConfigFile(
+          'settings.json',
+          DriveStorageProvider.P_SETTINGS,
+          'application/json',
+          content,
+          'F3',
+        )
+        return
+      case DriveStorageProvider.P_PROFILE:
+        await this.putConfigFile(
+          'profile.md',
+          DriveStorageProvider.P_PROFILE,
+          'text/markdown',
+          content,
+          'F4',
+        )
+        return
+      case DriveStorageProvider.P_INDEX:
+        await this.putConfigFile(
+          'index.json',
+          DriveStorageProvider.P_INDEX,
+          'application/json',
+          content,
+          'F2',
+        )
+        return
+      default:
+        if (logicalPath.startsWith(`${DriveStorageProvider.P_CHARACTERS}/`)) {
+          const fileName = logicalPath.slice(DriveStorageProvider.P_CHARACTERS.length + 1)
+          // .coaching.md は F7、それ以外のキャラ md は F6(saveCharacterMd / saveCoachingMd と一致)。
+          const role = fileName.endsWith('.coaching.md') ? 'F7' : 'F6'
+          await this.putCharacterFile(fileName, logicalPath, content, role)
+          return
+        }
+        throw new Error(`writeContentForPath: unsupported logicalPath ${logicalPath}`)
+    }
   }
 
   /** MD フロントマターから `version: <整数>` を取り出す。無ければ null。 */
