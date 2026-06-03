@@ -111,7 +111,32 @@ export class DriveStorageProvider implements StorageProvider {
   // 最後にフラッシュがクリーンに捌けた時刻(RFC3339)。getSyncState.lastSyncedAt 用。
   private lastSyncedAt: string | null = null
 
+  // -- watch / 競合通知(段階2f) --------------------------------
+  // contract: watchSettings / watchSyncState / onConflict。GoogleAuthProvider.onStageChange と同型で
+  //   listeners 配列 + unsubscribe クロージャ。型は contract に厳密一致させる。
+  private settingsListeners: WatchCallback<Settings>[] = []
+  private syncStateListeners: WatchCallback<SyncState>[] = []
+  private conflictListeners: Array<(event: ConflictEvent) => void> = []
+  // 競合(handleConflict が conflicts/ へ退避した未レビュー件数)。getSyncState.conflictsAwaitingReview。
+  private conflictCount = 0
+  // online 復帰時の自動 flush ハンドラ。dispose で removeEventListener するため参照を保持。
+  private onlineHandler: (() => void) | null = null
+
   // -- ライフサイクル ---------------------------------------
+
+  constructor() {
+    // online 復帰でオフライン保留キューを自動フラッシュ(段階2f)。
+    // SSR / 非 DOM 環境(window 不在)では登録しない劣化運用に倒す。
+    if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
+      this.onlineHandler = () => {
+        // initialize 前(deps 未確立)の発火では未認証 flush を避けて何もしない。
+        if (this.deps) {
+          void this.flushPending()
+        }
+      }
+      window.addEventListener('online', this.onlineHandler)
+    }
+  }
 
   async initialize(deps: StorageDeps): Promise<InitResult> {
     this.deps = deps
@@ -237,8 +262,12 @@ export class DriveStorageProvider implements StorageProvider {
   }
 
   async dispose(): Promise<void> {
+    // 段階2f: online 自動 flush ハンドラを解除してから後始末する。
+    if (this.onlineHandler && typeof window !== 'undefined') {
+      window.removeEventListener('online', this.onlineHandler)
+    }
+    this.onlineHandler = null
     // 段階2a: キャッシュを flush(現状 write-through で即返り)してから接続を閉じる。
-    //   段階2e で PendingQueue flush / watcher 解除を追加する。
     if (this.cache) {
       try {
         await this.cache.flush()
@@ -252,6 +281,10 @@ export class DriveStorageProvider implements StorageProvider {
     }
     this.fileIdMap.clear()
     this.etagMap.clear()
+    // 段階2f: watch 購読者をクリア(teardown 後の通知漏れ防止)。
+    this.settingsListeners = []
+    this.syncStateListeners = []
+    this.conflictListeners = []
     this.deps = null
   }
 
@@ -373,6 +406,9 @@ export class DriveStorageProvider implements StorageProvider {
         this.etagMap.set(DriveStorageProvider.P_SETTINGS, meta.etag)
       }
       await this.cache?.set(DriveStorageProvider.P_SETTINGS, toSave, meta)
+      // 段階2f: 設定購読者へ新値、同期購読者へ最新 SyncState を通知。
+      this.notifySettings(toSave)
+      this.notifySyncState()
       return { ok: true, meta }
     } catch (err) {
       // 412 競合の検知(段階2a)。本処理 = ours を conflicts/ に退避 + ConflictEvent 発火は
@@ -396,8 +432,12 @@ export class DriveStorageProvider implements StorageProvider {
     }
   }
 
-  watchSettings(_cb: WatchCallback<Settings>): Unsubscribe {
-    throw new Error('DriveStorageProvider.watchSettings() not implemented yet (段階2)')
+  // 段階2f: 設定購読。saveSettings 成功時に新値を通知(notifySettings)。
+  watchSettings(cb: WatchCallback<Settings>): Unsubscribe {
+    this.settingsListeners.push(cb)
+    return () => {
+      this.settingsListeners = this.settingsListeners.filter((l) => l !== cb)
+    }
   }
 
   // -- キャラ (F2 index.json / F6 / F7) ---------------------
@@ -445,6 +485,7 @@ export class DriveStorageProvider implements StorageProvider {
         'F2',
       )
       await this.cache?.set(DriveStorageProvider.P_INDEX, toSave, meta)
+      this.notifySyncState() // 段階2f
       return { ok: true, meta }
     } catch (err) {
       // 412 競合検知のみ(本処理は段階2e、saveSettings 参照)
@@ -590,6 +631,7 @@ export class DriveStorageProvider implements StorageProvider {
         'F4',
       )
       await this.cache?.set(DriveStorageProvider.P_PROFILE, profile, meta)
+      this.notifySyncState() // 段階2f
       return { ok: true, meta }
     } catch (err) {
       if (err instanceof DriveHttpError && err.kind === 'conflict') {
@@ -723,15 +765,19 @@ export class DriveStorageProvider implements StorageProvider {
       online: navigator.onLine,
       pendingWrites: this.pendingCount,
       lastSyncedAt: this.lastSyncedAt,
-      // 競合レビュー待ち件数は conflicts/ 退避(段階2e の append/handleConflict 本実装)とセット。
-      // 本ステップ(2e-4)では未配線のため 0。
-      conflictsAwaitingReview: 0,
+      // 段階2f: handleConflict が conflicts/ へ退避した未レビュー件数を反映。
+      // ★ in-memory カウンタのため、再起動後の初期復元(conflicts/ 列挙→件数復元)は別ステップ(申し送り)。
+      conflictsAwaitingReview: this.conflictCount,
       authStage: this.deps?.auth.currentStage() ?? 'unauth',
     }
   }
 
-  watchSyncState(_cb: WatchCallback<SyncState>): Unsubscribe {
-    throw new Error('DriveStorageProvider.watchSyncState() not implemented yet (段階2)')
+  // 段階2f: 同期状態購読。save 成功 / flushPending 完了 / handleConflict 完了時に最新 SyncState を通知。
+  watchSyncState(cb: WatchCallback<SyncState>): Unsubscribe {
+    this.syncStateListeners.push(cb)
+    return () => {
+      this.syncStateListeners = this.syncStateListeners.filter((l) => l !== cb)
+    }
   }
 
   async flushPending(): Promise<FlushResult> {
@@ -787,14 +833,66 @@ export class DriveStorageProvider implements StorageProvider {
       // クリーンに捌けたタイミングを最終同期時刻として記録(SyncState.lastSyncedAt 用)。
       // 契約の lastSyncedAt は string|null のため Date.now() の数値ではなく RFC3339 文字列で持つ。
       this.lastSyncedAt = this.deps?.clock.now().toISOString() ?? this.lastSyncedAt
+      this.notifySyncState() // 段階2f: pendingWrites / lastSyncedAt の変化を通知
       return { ok: true, flushed, skipped }
     }
     // error が残存(リトライ対象あり)。reason は契約の許容値 'partial' を使う(詳細は warn 済)。
+    this.notifySyncState() // 段階2f: 部分フラッシュでも pendingWrites は減っているため通知
     return { ok: false, reason: 'partial', flushed }
   }
 
-  onConflict(_cb: (event: ConflictEvent) => void): Unsubscribe {
-    throw new Error('DriveStorageProvider.onConflict() not implemented yet (段階2)')
+  // 段階2f: 競合購読。handleConflict が ConflictEvent を発火する。
+  onConflict(cb: (event: ConflictEvent) => void): Unsubscribe {
+    this.conflictListeners.push(cb)
+    return () => {
+      this.conflictListeners = this.conflictListeners.filter((l) => l !== cb)
+    }
+  }
+
+  // -- watch 通知ヘルパー(段階2f) --------------------------------
+  // listener の例外は購読者側の責務だが、他の購読者・本処理を巻き込まないよう握って warn に留める。
+
+  /** watchSettings 購読者へ最新の Settings を通知(saveSettings 成功時)。 */
+  private notifySettings(value: Settings): void {
+    for (const cb of this.settingsListeners) {
+      try {
+        cb(value)
+      } catch (err) {
+        this.deps?.logger?.warn('DriveStorageProvider.notifySettings: listener threw', {
+          err: this.serializeError(err),
+        })
+      }
+    }
+  }
+
+  /** watchSyncState 購読者へ現在の SyncState を通知(save / flush / conflict 後)。 */
+  private notifySyncState(): void {
+    if (this.syncStateListeners.length === 0) {
+      return
+    }
+    const state = this.getSyncState()
+    for (const cb of this.syncStateListeners) {
+      try {
+        cb(state)
+      } catch (err) {
+        this.deps?.logger?.warn('DriveStorageProvider.notifySyncState: listener threw', {
+          err: this.serializeError(err),
+        })
+      }
+    }
+  }
+
+  /** onConflict 購読者へ競合イベントを通知。 */
+  private notifyConflict(event: ConflictEvent): void {
+    for (const cb of this.conflictListeners) {
+      try {
+        cb(event)
+      } catch (err) {
+        this.deps?.logger?.warn('DriveStorageProvider.notifyConflict: listener threw', {
+          err: this.serializeError(err),
+        })
+      }
+    }
   }
 
   // ============================================================
@@ -934,6 +1032,18 @@ export class DriveStorageProvider implements StorageProvider {
       'config',
     )
     return config.id
+  }
+
+  /** MIYU_App_Data/config/conflicts を冪等確保し fileId を返す(handleConflict 退避先、段階2f)。 */
+  private async ensureConflictsFolderId(): Promise<string> {
+    const configId = await this.ensureConfigFolderId()
+    const conflicts = await this.ensureFolder(
+      DriveStorageProvider.P_CONFLICTS,
+      'conflicts',
+      configId,
+      'conflicts',
+    )
+    return conflicts.id
   }
 
   /** settings.json の fileId を解決(読み取り専用、無ければ null。作成はしない) */
@@ -1313,6 +1423,7 @@ export class DriveStorageProvider implements StorageProvider {
       }
       const meta = await this.putCharacterFile(fileName, logicalPath, md, role)
       await this.cache?.set(logicalPath, md, meta)
+      this.notifySyncState() // 段階2f
       return { ok: true, meta }
     } catch (err) {
       if (err instanceof DriveHttpError && err.kind === 'conflict') {
@@ -1634,18 +1745,79 @@ export class DriveStorageProvider implements StorageProvider {
   // -- LWW 競合解決(骨格、本実装は段階2e) ------------------
 
   /**
-   * LWW 競合(412)の解決。段階2e で internal/ConflictResolver に委譲して本実装する:
-   *   1. ours(ローカル保存待ちだった内容)を config/conflicts/<timestamp>-<file> に退避
-   *   2. ConflictEvent(retainedPath / occurredAt / ours / theirs)を組み立てて発火
-   *   3. キャッシュを theirs(Drive 側)で更新、watchers に theirs を通知
-   * 段階2a では未実装。saveSettings の 412 検知は reason:'conflict' を返すに留める。
+   * LWW 競合の解決(段階2f 本実装)。コメント L1638-1641 の想定挙動どおり:
+   *   1. ours を config/conflicts/<timestamp>-<file> に退避(競合レコードとして)
+   *   2. キャッシュを無効化し、次回 load で Drive 側(theirs)を取得させる
+   *   3. ConflictEvent(file / retainedPath / occurredAt / ours / theirs)を組み立てて発火
+   *      + conflictCount を加算 → SyncState 変化を通知
+   *
+   * ★ 設計判断(エルトン確認事項):
+   *   - 現行の呼出(saveSettings 412 検知)は ours/theirs としてメタデータ(etag/modifiedTime)のみ渡す。
+   *     シグネチャに content が無いため、退避ファイルは「ours の本文」ではなく競合レコード(JSON)を残す。
+   *     本文退避が要件なら handleConflict に content を渡す拡張が要る(= 2a の saveSettings 呼出変更=要承認)。
+   *   - 「キャッシュを theirs で更新」は theirs 本文を持たないため、cache.delete による無効化で代替
+   *     (次回 load=Drive=theirs と end-state は同じ)。型付き watcher への theirs 直接通知は同理由で見送り、
+   *     watchSyncState への状態通知に留める。
    */
   private async handleConflict(
-    _logicalPath: string,
-    _ours: { modifiedTime: string; etag: string },
-    _theirs: { modifiedTime: string; etag: string },
+    logicalPath: string,
+    ours: { modifiedTime: string; etag: string },
+    theirs: { modifiedTime: string; etag: string },
   ): Promise<void> {
-    throw new Error('DriveStorageProvider.handleConflict() not implemented yet (段階2e)')
+    const deps = this.deps
+    if (!deps) {
+      return
+    }
+    const occurredAt = deps.clock.now()
+
+    // 競合レビュー待ち件数を加算(getSyncState.conflictsAwaitingReview)。
+    this.conflictCount++
+
+    // 1. ours を config/conflicts/ に退避(競合レコード)。retainedPath を控える。
+    const safeName = logicalPath.replace(/[^A-Za-z0-9._-]/g, '_')
+    const stamp = occurredAt.toISOString().replace(/[:.]/g, '-')
+    const retainedFileName = `${stamp}-${safeName}`
+    const retainedPath = `${DriveStorageProvider.P_CONFLICTS}/${retainedFileName}`
+    const record = JSON.stringify(
+      { logicalPath, occurredAt: occurredAt.toISOString(), ours, theirs },
+      null,
+      2,
+    )
+    try {
+      const conflictsId = await this.ensureConflictsFolderId()
+      await this.driveCreateFile(
+        conflictsId,
+        retainedFileName,
+        'application/json',
+        record,
+        'conflict',
+      )
+    } catch (err) {
+      deps.logger?.warn('DriveStorageProvider.handleConflict: retain failed', {
+        logicalPath,
+        err: this.serializeError(err),
+      })
+    }
+
+    // 2. キャッシュを無効化(次回 load で Drive 側 = theirs を取得させる)。
+    try {
+      await this.cache?.delete(logicalPath)
+    } catch (err) {
+      deps.logger?.warn('DriveStorageProvider.handleConflict: cache invalidate failed', {
+        logicalPath,
+        err: this.serializeError(err),
+      })
+    }
+
+    // 3. ConflictEvent を発火 + SyncState 変化(conflictsAwaitingReview)を通知。
+    this.notifyConflict({
+      file: logicalPath,
+      retainedPath,
+      occurredAt,
+      ours,
+      theirs,
+    })
+    this.notifySyncState()
   }
 
   // -- エラー → Result reason 変換 ---------------------------
