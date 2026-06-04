@@ -56,7 +56,13 @@ import { IndexedDbCache } from './internal/IndexedDbCache'
 import { resolveCacheTtlMs } from './internal/cache-config'
 import { PendingQueueStore } from './internal/PendingQueueStore'
 import { ConflictResolver } from './internal/ConflictResolver'
-import { getBundledCharacterMd, getBundledCoachingMd } from '@/assets/characters/registry'
+import {
+  getBundledCharacterMd,
+  getBundledCoachingMd,
+  listBundledCharacterIds,
+} from '@/assets/characters/registry'
+// index.ts wiring(エルトン GO 2026-06-04): 同梱 index を seedDefaults / loadCharacterIndex fallback で消費。
+import { BUNDLED_CHARACTER_INDEX } from '@/assets/characters'
 
 // Drive API のエラーを種別つきで内部に運ぶ(呼出側で Result reason に変換)
 // 'conflict' は段階2a で追加(412 Precondition Failed = If-Match 不一致、段階2e で本処理)
@@ -261,6 +267,88 @@ export class DriveStorageProvider implements StorageProvider {
     }
   }
 
+  /**
+   * 同梱デフォルトを Drive へ初回 seeding する(contract 外のクラス固有メソッド、index.ts wiring)。
+   * 設計: docs/Phase2/Phase2_Drive_ファイルレイアウト設計_v0.1 §6 初回作成フロー(冪等)。
+   *
+   * ▼ スコープ(エルトン GO 2026-06-04、Uさん 推奨どおり):
+   *   B-2 最小 seeding — config/index.json + config/characters/<id>.md / <id>.coaching.md のみ。
+   *   settings.json は saveSettings の遅延作成に委譲、profile.md / manual.md / errors.md は対象外。
+   *   B-2a: consents を seeding で捏造しないため settings.json をここでは作らない
+   *         (規約・年齢同意は ConsentService = Stage 0→0.5 の責務)。§6.2 フル13手順との差分は意図的。
+   *
+   * ▼ 冪等(§6.1 ステート判定 ⓐ初回 / ⓒ部分復元):
+   *   各ファイルは存在確認し「無ければ同梱から作成・有れば触らない(ユーザー編集を保護)」。
+   *   → フォルダ無し(初回)も主要ファイル欠落(部分復元)も同じループで満たす。
+   *
+   * 前提: initialize() 済み。フォルダ階層は本メソッド内で冪等確保するため ensureLayout() 前後どちらでも可。
+   * 返り値: EnsureLayoutResult を流用(created=今回 seed した論理パス / existed=既存でスキップした論理パス)。
+   */
+  async seedDefaults(): Promise<EnsureLayoutResult> {
+    const deps = this.deps
+    if (!deps) {
+      return { ok: false, reason: 'unknown' }
+    }
+
+    const created: string[] = []
+    const existed: string[] = []
+    const track = (r: 'created' | 'existed', logicalPath: string): void => {
+      ;(r === 'created' ? created : existed).push(logicalPath)
+    }
+
+    try {
+      // フォルダ階層を冪等確保(characters 確保で root/config も連鎖確保される)。
+      const charsId = await this.ensureCharactersFolderId()
+      const configId = await this.ensureConfigFolderId()
+
+      // 1. config/index.json(F2) — 同梱 BUNDLED_CHARACTER_INDEX をデフォルトに。
+      track(
+        await this.seedFileIfAbsent(
+          configId,
+          'index.json',
+          DriveStorageProvider.P_INDEX,
+          'application/json',
+          JSON.stringify(BUNDLED_CHARACTER_INDEX, null, 2),
+          'F2',
+        ),
+        DriveStorageProvider.P_INDEX,
+      )
+
+      // 2. config/characters/<id>.md(F6) / <id>.coaching.md(F7) — 同梱から。
+      for (const id of listBundledCharacterIds()) {
+        const charMd = getBundledCharacterMd(id)
+        if (charMd !== null) {
+          const fileName = `${id}.md`
+          const logicalPath = `${DriveStorageProvider.P_CHARACTERS}/${fileName}`
+          track(
+            await this.seedFileIfAbsent(charsId, fileName, logicalPath, 'text/markdown', charMd, 'F6'),
+            logicalPath,
+          )
+        }
+        const coachingMd = getBundledCoachingMd(id)
+        if (coachingMd !== null) {
+          const fileName = `${id}.coaching.md`
+          const logicalPath = `${DriveStorageProvider.P_CHARACTERS}/${fileName}`
+          track(
+            await this.seedFileIfAbsent(
+              charsId,
+              fileName,
+              logicalPath,
+              'text/markdown',
+              coachingMd,
+              'F7',
+            ),
+            logicalPath,
+          )
+        }
+      }
+
+      return { ok: true, created, existed }
+    } catch (err) {
+      return { ok: false, reason: this.toEnsureReason(err) }
+    }
+  }
+
   async dispose(): Promise<void> {
     // 段階2f: online 自動 flush ハンドラを解除してから後始末する。
     if (this.onlineHandler && typeof window !== 'undefined') {
@@ -444,7 +532,7 @@ export class DriveStorageProvider implements StorageProvider {
   // loadCharacterIndex / saveCharacterIndex は段階2b(settings 同型の JSON)。
   // loadCharacterMd / saveCharacterMd / loadCoachingMd / saveCoachingMd / diffBundledVsDrive は段階2c。
   async loadCharacterIndex(opts?: LoadOptions): Promise<LoadResult<CharacterIndex>> {
-    return this.loadConfigFile<CharacterIndex>(
+    const result = await this.loadConfigFile<CharacterIndex>(
       'index.json',
       DriveStorageProvider.P_INDEX,
       opts,
@@ -456,6 +544,18 @@ export class DriveStorageProvider implements StorageProvider {
         }
       },
     )
+    // index.ts wiring(A-1): Drive 未配置(初回起動・未 seed)時は同梱 index を bundled で返す。
+    //   loadCharacterMd の bundledResult と対称。fallback は not_found のみ——
+    //   parse_error(JSON 破損)の default fallback + .broken 退避は別ステップ(エルトン GO で対象外)。
+    //   offline / rate_limit + stale cache は loadConfigFile が cached を添えて返すため、ここでは触らない。
+    if (!result.ok && result.reason === 'not_found') {
+      return {
+        ok: true,
+        value: BUNDLED_CHARACTER_INDEX,
+        meta: { driveFileId: '', modifiedTime: '', etag: '', source: 'bundled' },
+      }
+    }
+    return result
   }
 
   async saveCharacterIndex(index: CharacterIndex): Promise<SaveResult> {
@@ -1171,6 +1271,30 @@ export class DriveStorageProvider implements StorageProvider {
       etag: json.version ?? json.md5Checksum ?? '',
       source: 'drive',
     }
+  }
+
+  /**
+   * seedDefaults 用: parent 直下に fileName が無ければ content で新規作成して 'created'、
+   * 既存なら fileIdMap を温めて 'existed'(既存は上書きしない=ユーザー編集を保護)。
+   * putConfigFile / putCharacterFile が create-or-update なのに対し、こちらは create-only。
+   */
+  private async seedFileIfAbsent(
+    parentId: string,
+    fileName: string,
+    logicalPath: string,
+    contentType: string,
+    content: string,
+    role: string,
+  ): Promise<'created' | 'existed'> {
+    const existing = await this.findChildId(parentId, fileName, false)
+    if (existing) {
+      this.fileIdMap.set(logicalPath, existing)
+      return 'existed'
+    }
+    const res = await this.driveCreateFile(parentId, fileName, contentType, content, role)
+    const json = (await res.json()) as { id: string }
+    this.fileIdMap.set(logicalPath, json.id)
+    return 'created'
   }
 
   // -- config 直下ファイルの共通 read / write(段階2b) -------
