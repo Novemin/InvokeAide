@@ -13,3 +13,6 @@ export { DriveStorageProvider } from './DriveStorageProvider'
 
 export { VoicevoxTTSProvider } from './VoicevoxTTSProvider'
 export type { VoicevoxConfig, VoicevoxDeps } from './VoicevoxTTSProvider'
+
+// S2-2: 最初の AIProvider 実装(BYOK Gemini)
+export { GeminiProvider } from './GeminiProvider'
