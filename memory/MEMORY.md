@@ -12,6 +12,7 @@ CLAUDE.md §9 のメモリ運用ルールに基づく、Sさん・Tさん 共通
 
 - [Tさん→Sさん 申し送り](T_to_S.md) — Sさん 起草開始時に必ず参照、 a11y skip 解除 + lighthouse 指摘再確認 + テスト容易性 設計原則
 - [npm audit 18件 整理](Tech_debt_npm_audit_2026-05-22.md) — Phase 2 末別タスクのインプット、 @lhci/cli クラスタ13件 + vite/vitest クラスタ6件 に集中、 本番リスクなし
+- [共有ワークツリーのブランチ衝突](Shared_worktree_branch_collision_2026-06-06.md) — S/T/U が同一ツリーで checkout すると HEAD が全員分切り替わる。コミット直前に `git branch --show-current` 検証必須
 
 ## 用語・呼称集(整合チェック観点3 の派生物として今後追加)
 
