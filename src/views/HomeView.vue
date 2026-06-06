@@ -18,6 +18,12 @@
     <p class="placeholder-note">
       ここに、 後の Step で召喚 UI と対話 UI が入ります。
     </p>
+    <router-link
+      class="settings-link"
+      to="/settings"
+    >
+      設定(API キー / Google 接続)
+    </router-link>
   </section>
 </template>
 
@@ -44,6 +50,12 @@
 .placeholder-note {
   margin: 0;
   opacity: 0.75;
+  font-size: 0.9rem;
+}
+
+.settings-link {
+  margin-top: 20px;
+  color: #cfe8cf;
   font-size: 0.9rem;
 }
 </style>
