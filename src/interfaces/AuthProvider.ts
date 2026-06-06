@@ -45,6 +45,14 @@ export interface AuthDeps {
 
 export interface AuthConfig {
   clientId: string;
+  /**
+   * OAuth client_secret(2026-06-06 追加)。
+   * Google のトークンエンドポイントは confidential client(Web/Desktop)で client_secret を必須とする
+   * (実機で 'client_secret is missing' を確認)。env(.env.local / VITE_GOOGLE_CLIENT_SECRET)から注入。
+   * クライアントサイドに secret を含めることは本来非推奨だが、デスクトップアプリ型 OAuth では
+   * Google が事実上許容している設計。任意(?)としつつ未設定だとトークン交換が 400 になる。
+   */
+  clientSecret?: string;
   /** 例: 'https://invokeaide-beta.pages.dev/auth/callback' */
   redirectUri: string;
   /** 例: ['openid', 'email', 'profile', 'drive.file', 'tasks'] */

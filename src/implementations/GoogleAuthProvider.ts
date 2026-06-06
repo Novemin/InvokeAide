@@ -332,6 +332,9 @@ export class GoogleAuthProvider implements AuthProvider {
       code,
       code_verifier: codeVerifier,
       client_id: config.clientId,
+      // confidential client(Web/Desktop)では Google が client_secret を必須とする
+      // (2026-06-06 実機で 'client_secret is missing' を確認)。secret 注記は AuthConfig 参照。
+      client_secret: config.clientSecret ?? '',
       redirect_uri: config.redirectUri,
     })
   }
@@ -341,6 +344,9 @@ export class GoogleAuthProvider implements AuthProvider {
       grant_type: 'refresh_token',
       refresh_token: refreshToken,
       client_id: config.clientId,
+      // refresh_token 交換も confidential client では client_secret が必須
+      // (これが無いと silentRefresh / getAccessToken が同じ 400 で失敗する)
+      client_secret: config.clientSecret ?? '',
     })
   }
 

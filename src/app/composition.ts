@@ -42,6 +42,8 @@ function buildAuthConfig(): AuthConfig {
   const env = import.meta.env
   return {
     clientId: (env.VITE_GOOGLE_CLIENT_ID as string | undefined) ?? '',
+    // confidential client 用 secret(.env.local、gitignore 済)。トークン交換で必須。
+    clientSecret: (env.VITE_GOOGLE_CLIENT_SECRET as string | undefined) ?? '',
     redirectUri: (env.VITE_GOOGLE_REDIRECT_URI as string | undefined) ?? '',
     // Stage1: ログイン情報 + Drive(drive.file) + Tasks
     stage1Scopes: [
