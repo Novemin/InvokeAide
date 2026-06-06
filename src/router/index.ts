@@ -1,14 +1,27 @@
 import { createRouter, createWebHistory, type RouteRecordRaw } from 'vue-router';
 import HomeView from '@/views/HomeView.vue';
 
-// B1 段階の最小ルーティング
-// B2 で /settings(設定画面)、 B3 で /chat(対話 UI) が追加される想定
+// ルーティング
+// B1: / (home)
+// S2-1: /settings(設定画面)、 /auth/callback(OAuth コールバック)
+// B3 で /chat(対話 UI) が追加される想定
+// 設定・コールバックは遅延ロード(home バンドルを小さく保つ)
 
 const routes: RouteRecordRaw[] = [
   {
     path: '/',
     name: 'home',
     component: HomeView,
+  },
+  {
+    path: '/settings',
+    name: 'settings',
+    component: () => import('@/views/SettingsView.vue'),
+  },
+  {
+    path: '/auth/callback',
+    name: 'auth-callback',
+    component: () => import('@/views/AuthCallbackView.vue'),
   },
 ];
 
