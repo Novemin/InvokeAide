@@ -14,8 +14,10 @@
 import type { Clock, Logger } from '@/interfaces/types'
 import type { SecretStore, SecretStoreInitResult } from '@/interfaces/SecretStore'
 import type { AuthConfig, AuthInitResult } from '@/interfaces/AuthProvider'
+import type { AIProvider, AIProviderConfig, AIInitResult } from '@/interfaces/AIProvider'
 import { IndexedDbSecretStore } from '@/implementations/IndexedDbSecretStore'
 import { GoogleAuthProvider } from '@/implementations/GoogleAuthProvider'
+import { GeminiProvider } from '@/implementations/GeminiProvider'
 
 // Clock 抽象遵守(直接 new Date() を実装側に書かない、テスト容易性)。contract: now(): Date
 const clock: Clock = {
@@ -54,6 +56,19 @@ function buildAuthConfig(): AuthConfig {
   }
 }
 
+/**
+ * AIProvider(Gemini)設定を組み立てる。
+ * model は実装既定(gemini-2.5-flash)に委ねるため null。
+ * fallbackApiKey は開発用 env(本番ユーザーは設定画面から SecretStore に保存)。
+ */
+function buildAIConfig(): AIProviderConfig {
+  const env = import.meta.env
+  return {
+    model: null,
+    fallbackApiKey: (env.VITE_GEMINI_API_KEY_FALLBACK as string | undefined) ?? null,
+  }
+}
+
 /** AuthProvider.initialize を SecretStore 失敗で省略した場合の擬似結果 */
 type AuthInitOutcome = AuthInitResult | { ok: false; reason: 'skipped_secret_store' }
 
@@ -61,9 +76,12 @@ export interface AppServices {
   secretStore: SecretStore
   /** handleAuthCallback() を使うため具象型で公開する */
   auth: GoogleAuthProvider
+  /** LLM(BYOK Gemini)。契約型で公開(将来 Claude/OpenAI に差し替え可能) */
+  ai: AIProvider
   status: {
     secretStore: SecretStoreInitResult
     auth: AuthInitOutcome
+    ai: AIInitResult
   }
 }
 
@@ -83,6 +101,7 @@ export function getServices(): Promise<AppServices> {
 async function initServices(): Promise<AppServices> {
   const secretStore = new IndexedDbSecretStore()
   const auth = new GoogleAuthProvider()
+  const ai = new GeminiProvider()
 
   const secretStoreResult = await secretStore.initialize({ clock, logger })
 
@@ -94,10 +113,15 @@ async function initServices(): Promise<AppServices> {
     authResult = await auth.initialize({ secretStore, clock, logger, config: buildAuthConfig() })
   }
 
+  // AIProvider は SecretStore から BYOK 鍵を読むため secretStore を渡す(generate 時に取得)。
+  // SecretStore 失敗環境でも、env フォールバック鍵で会話できる余地を残すため初期化は試みる。
+  const aiResult = await ai.initialize({ secretStore, clock, logger, config: buildAIConfig() })
+
   return {
     secretStore,
     auth,
-    status: { secretStore: secretStoreResult, auth: authResult },
+    ai,
+    status: { secretStore: secretStoreResult, auth: authResult, ai: aiResult },
   }
 }
 
