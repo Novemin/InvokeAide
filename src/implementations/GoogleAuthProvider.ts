@@ -44,10 +44,13 @@ interface TokenResponse {
 class AuthHttpError extends Error {
   readonly kind: 'network' | 'invalid_grant' | 'http'
   readonly status?: number
-  constructor(kind: 'network' | 'invalid_grant' | 'http', status?: number) {
-    super(`AuthHttpError:${kind}${status != null ? `:${status}` : ''}`)
+  /** 診断用: トークンエンドポイントの応答本文(Google の { error, error_description }) */
+  readonly detail?: string
+  constructor(kind: 'network' | 'invalid_grant' | 'http', status?: number, detail?: string) {
+    super(`AuthHttpError:${kind}${status != null ? `:${status}` : ''}${detail ? ` ${detail}` : ''}`)
     this.kind = kind
     this.status = status
+    this.detail = detail
   }
 }
 
@@ -165,6 +168,9 @@ export class GoogleAuthProvider implements AuthProvider {
       }
       deps.logger?.error?.('AuthProvider.handleAuthCallback: exchange failed', {
         err: this.serializeError(err),
+        status: err instanceof AuthHttpError ? err.status : undefined,
+        // 診断: Google が返した原因(client_secret 欠落 / redirect_uri 不一致 等)
+        detail: err instanceof AuthHttpError ? err.detail : undefined,
       })
       return { ok: false, reason: 'unknown' }
     }
@@ -351,13 +357,37 @@ export class GoogleAuthProvider implements AuthProvider {
       throw new AuthHttpError('network')
     }
     if (!res.ok) {
+      // 診断: 原因特定のため応答本文(Google の { error, error_description })を読む。
+      // 例: 'invalid_request: client_secret is missing' / 'redirect_uri_mismatch'
+      const detail = await this.readErrorDetail(res)
       // 400 / 401 は invalid_grant(refresh_token 失効・code 不正)として扱う
       if (res.status === 400 || res.status === 401) {
-        throw new AuthHttpError('invalid_grant', res.status)
+        throw new AuthHttpError('invalid_grant', res.status, detail)
       }
-      throw new AuthHttpError('http', res.status)
+      throw new AuthHttpError('http', res.status, detail)
     }
     return (await res.json()) as TokenResponse
+  }
+
+  /**
+   * トークンエンドポイントのエラー応答本文を診断用に抽出する(失敗しても undefined を返すのみ)。
+   * Google は { error, error_description } の JSON を返す。秘匿情報は含まれない想定。
+   */
+  private async readErrorDetail(res: Response): Promise<string | undefined> {
+    let text: string
+    try {
+      text = await res.text()
+    } catch {
+      return undefined
+    }
+    if (!text) return undefined
+    try {
+      const json = JSON.parse(text) as { error?: string; error_description?: string }
+      const parts = [json.error, json.error_description].filter(Boolean)
+      return parts.length > 0 ? parts.join(': ') : text.slice(0, 200)
+    } catch {
+      return text.slice(0, 200)
+    }
   }
 
   private buildAuthUrl(
