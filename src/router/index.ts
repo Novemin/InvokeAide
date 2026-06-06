@@ -1,17 +1,21 @@
 import { createRouter, createWebHistory, type RouteRecordRaw } from 'vue-router';
-import HomeView from '@/views/HomeView.vue';
+import SummonView from '@/views/SummonView.vue';
 
 // ルーティング
-// B1: / (home)
+// S2-3: / (召喚UI)、 /chat(対話UI)
 // S2-1: /settings(設定画面)、 /auth/callback(OAuth コールバック)
-// B3 で /chat(対話 UI) が追加される想定
-// 設定・コールバックは遅延ロード(home バンドルを小さく保つ)
+// 設定・対話・コールバックは遅延ロード(初期バンドルを小さく保つ)
 
 const routes: RouteRecordRaw[] = [
   {
     path: '/',
-    name: 'home',
-    component: HomeView,
+    name: 'summon',
+    component: SummonView,
+  },
+  {
+    path: '/chat',
+    name: 'chat',
+    component: () => import('@/views/ChatView.vue'),
   },
   {
     path: '/settings',
