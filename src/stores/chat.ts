@@ -15,6 +15,7 @@ import type { CharacterEntry } from '@/interfaces/domain'
 import type {
   AIErrorReason,
   ChatMessage,
+  RateLimitScope,
   ToolCall,
   ToolDeclaration,
   ToolResult,
@@ -30,27 +31,49 @@ export interface DisplayMessage {
   content: string
 }
 
-/** AIErrorReason を会話画面向けの日本語に */
-function mapAIError(reason: AIErrorReason): string {
+// ユーザー向けエラー文言は1か所に集約する(後から差し替えやすくするため)。
+const ERROR_MESSAGES = {
+  noApiKey: 'Gemini API キーが未設定です。設定画面で入力してください。',
+  // 500/502/503/504 と fetch 失敗(オフライン等)
+  network: '通信エラーが出ました。もう一度試してください',
+  // 429・分の上限
+  rateLimitMinute: '上限に達しました。少し待ってからもう一度試してください',
+  // 429・日の上限
+  rateLimitDay: '本日の利用上限に達しました。時間をおいて試してください',
+  // Gemini API の認証エラー(GeminiProvider が 401/403)。直す場所 = BYOK キー。
+  authGemini: 'Gemini APIキーが正しくないか未設定です。設定画面で確認してください',
+  // Google(OAuth)の認証エラー(Tasks/Calendar 等の getAccessToken 失敗・401/403)。直す場所 = Google 接続。
+  authGoogle: 'Googleアカウントに接続できません。設定画面から接続し直してください',
+  safety: '安全性の都合で応答できませんでした。表現を変えてお試しください。',
+  invalidRequest: 'リクエストが不正でした。',
+  emptyResponse: '応答が空でした。もう一度お試しください。',
+  aborted: '送信を取り消しました。',
+  unknown: 'エラーが発生しました。しばらくして再度お試しください',
+} as const
+
+/** AIErrorReason(+ 429 の分/日)を会話画面向けの日本語文言に対応づける。 */
+function mapAIError(reason: AIErrorReason, rateLimitScope?: RateLimitScope): string {
   switch (reason) {
     case 'no_api_key':
-      return 'Gemini API キーが未設定です。設定画面で入力してください。'
+      return ERROR_MESSAGES.noApiKey
     case 'auth':
-      return 'API キーが無効です。設定画面で再設定してください。'
+      // Gemini 呼び出しの 401/403 = BYOK キーの問題(発生源 = Gemini)。
+      return ERROR_MESSAGES.authGemini
     case 'rate_limit':
-      return '混み合っています。少し待って再度お試しください。'
+      // 判別不能(scope 省略)時は分の上限扱い(フォールバック)。
+      return rateLimitScope === 'day' ? ERROR_MESSAGES.rateLimitDay : ERROR_MESSAGES.rateLimitMinute
     case 'network':
-      return 'ネットワークエラーが発生しました。'
+      return ERROR_MESSAGES.network
     case 'safety':
-      return '安全性の都合で応答できませんでした。表現を変えてお試しください。'
+      return ERROR_MESSAGES.safety
     case 'invalid_request':
-      return 'リクエストが不正でした。'
+      return ERROR_MESSAGES.invalidRequest
     case 'empty_response':
-      return '応答が空でした。もう一度お試しください。'
+      return ERROR_MESSAGES.emptyResponse
     case 'aborted':
-      return '送信を取り消しました。'
+      return ERROR_MESSAGES.aborted
     default:
-      return '応答の取得に失敗しました。'
+      return ERROR_MESSAGES.unknown
   }
 }
 
@@ -85,16 +108,15 @@ const TOOLS: ToolDeclaration[] = [
 /** Tasks 取得失敗の reason を、モデルがユーザーへ伝えられる日本語メッセージへ出し分ける。 */
 function mapTasksError(reason: GetTasksErrorReason): string {
   switch (reason) {
+    // getAccessToken 失敗・Tasks API 401/403 = Google(OAuth)の認証問題(発生源 = Google)。
     case 'no_refresh_token':
-      return 'Google アカウントに未接続です。設定画面から接続してください。'
     case 'refresh_failed':
-      return 'Google の認証が切れました。設定画面から再接続してください。'
     case 'auth':
-      return 'Google タスクへのアクセス権限がありません。設定画面で接続し直してください。'
+      return ERROR_MESSAGES.authGoogle
     case 'network':
-      return 'ネットワークエラーでタスクを取得できませんでした。'
+      return ERROR_MESSAGES.network
     default:
-      return 'タスクの取得に失敗しました。'
+      return ERROR_MESSAGES.unknown
   }
 }
 
@@ -175,7 +197,7 @@ export const useChatStore = defineStore('chat', () => {
           maxOutputTokens: 1024,
         })
         if (!result.ok) {
-          error.value = mapAIError(result.reason)
+          error.value = mapAIError(result.reason, result.rateLimitScope)
           return
         }
         // モデルがツール呼び出しを要求 → 実行して結果を履歴に積み、再生成へ。

@@ -21,6 +21,7 @@ import type {
   ChatRequest,
   ChatResult,
   ChatUsage,
+  RateLimitScope,
   ToolCall,
 } from '@/interfaces/AIProvider'
 
@@ -126,7 +127,8 @@ export class GeminiProvider implements AIProvider {
       }
 
       if (!res.ok) {
-        // 一時的サーバーエラーかつリトライ余地があれば待機して再送。
+        // 一時的サーバーエラー(5xx)かつリトライ余地があれば待機して再送。
+        // 429 はリトライ対象外(BYOK 無料枠を食い潰さないため。分の上限は数秒では空かない)。
         if (this.isTransientStatus(res.status) && attempt < GeminiProvider.MAX_RETRIES) {
           this.deps.logger?.warn('GeminiProvider.generate: transient error, retrying', {
             status: res.status,
@@ -135,7 +137,12 @@ export class GeminiProvider implements AIProvider {
           await this.backoffDelay(attempt, request.signal)
           continue
         }
-        // 恒久エラー、またはリトライ上限超過 → 従来どおりのエラーへフォールバック。
+        // 429 は本文から上限種別(分/日)を判定して返す(リトライしない)。
+        if (res.status === 429) {
+          const rateLimitScope = await this.classifyRateLimitScope(res)
+          return { ok: false, reason: 'rate_limit', rateLimitScope }
+        }
+        // 恒久エラー、またはリトライ上限超過(5xx)→ 従来どおりのエラーへフォールバック。
         return { ok: false, reason: this.mapHttpStatus(res.status) }
       }
 
@@ -314,6 +321,8 @@ export class GeminiProvider implements AIProvider {
     if (status === 400) return 'invalid_request'
     if (status === 401 || status === 403) return 'auth'
     if (status === 429) return 'rate_limit'
+    // 5xx は「通信が一時的に不調」カテゴリに寄せる(リトライ尽き後もここへ)。
+    if (status >= 500) return 'network'
     return 'unknown'
   }
 
@@ -321,15 +330,36 @@ export class GeminiProvider implements AIProvider {
     return err instanceof Error && err.name === 'AbortError'
   }
 
-  /** 一時的(リトライ可能)なサーバーエラーか。4xx 恒久エラーは含めない。 */
+  /**
+   * 一時的(リトライ可能)なサーバーエラーか。
+   * 429 は含めない(BYOK 無料枠を食い潰さないため。日/分の上限は数秒では空かない)。
+   * 4xx 恒久エラーも含めない。
+   */
   private isTransientStatus(status: number): boolean {
     return (
-      status === 429 || // rate limit(短時間の超過。待てば回復しうる)
       status === 500 ||
       status === 502 ||
       status === 503 || // Service Unavailable(本件の主対象)
       status === 504
     )
+  }
+
+  /**
+   * 429 の上限種別(分/日)を本文から判定する。
+   * 無料枠の 429 本文 error.details[].QuotaFailure.violations[].quotaId 等に
+   * 'PerDay' / 'PerMinute' を含む文字列が現れる。日を分と誤認しないよう PerDay を優先。
+   * 判定材料が無い場合は暫定で 'minute' 扱い(フォールバック)。
+   */
+  private async classifyRateLimitScope(res: Response): Promise<RateLimitScope> {
+    let text = ''
+    try {
+      text = await res.text()
+    } catch {
+      return 'minute'
+    }
+    if (/PerDay/i.test(text)) return 'day'
+    if (/PerMinute/i.test(text)) return 'minute'
+    return 'minute'
   }
 
   /**

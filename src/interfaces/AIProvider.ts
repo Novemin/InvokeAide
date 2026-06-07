@@ -90,7 +90,11 @@ export type ChatResult =
   | { ok: true; text: string; finishReason: ChatFinishReason; usage?: ChatUsage }
   // モデルがツール呼び出しを要求した(text はまだ無い)。呼出側が実行→再 generate する。
   | { ok: true; toolCalls: ToolCall[]; usage?: ChatUsage }
-  | { ok: false; reason: AIErrorReason };
+  // reason='rate_limit' のとき rateLimitScope で分/日の上限を区別できる(判別不能時は省略)。
+  | { ok: false; reason: AIErrorReason; rateLimitScope?: RateLimitScope };
+
+/** 429(rate_limit)の上限種別。分の上限 / 日の上限。判別不能時は呼出側で minute を既定とする。 */
+export type RateLimitScope = 'minute' | 'day';
 
 // -- function calling(ツール) --------------------------------
 
