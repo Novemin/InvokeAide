@@ -61,6 +61,11 @@ export class GeminiProvider implements AIProvider {
     'https://generativelanguage.googleapis.com/v1beta/models'
   private static readonly DEFAULT_MODEL = 'gemini-2.5-flash'
   private static readonly SECRET_KEY = 'gemini.apiKey'
+  // 一時的サーバーエラー時の自動リトライ上限(初回 + 最大2回 = 計3回試行)。
+  private static readonly MAX_RETRIES = 2
+  // バックオフ基準: attempt 0 → 500ms, 1 → 1000ms(指数)。これに jitter を足す。
+  private static readonly BACKOFF_BASE_MS = 500
+  private static readonly BACKOFF_JITTER_MS = 250
 
   private deps: AIProviderDeps | null = null
   private disposed = false
@@ -94,40 +99,61 @@ export class GeminiProvider implements AIProvider {
     const model = this.deps.config.model || GeminiProvider.DEFAULT_MODEL
     const url = `${GeminiProvider.API_BASE}/${encodeURIComponent(model)}:generateContent`
 
-    let res: Response
-    try {
-      res = await fetch(url, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-goog-api-key': apiKey,
-        },
-        body: JSON.stringify(body),
-        signal: request.signal,
-      })
-    } catch (err) {
-      if (this.isAbortError(err)) {
+    // 一時的サーバーエラー(503 等)は短い指数バックオフで自動再送する(最大 MAX_RETRIES 回)。
+    // 恒久エラー(4xx)・abort は即返す。function calling の往復でも各 generate に効く。
+    for (let attempt = 0; attempt <= GeminiProvider.MAX_RETRIES; attempt++) {
+      if (request.signal?.aborted) {
         return { ok: false, reason: 'aborted' }
       }
-      // fetch 自体の失敗(オフライン / DNS 等)
-      return { ok: false, reason: 'network' }
+
+      let res: Response
+      try {
+        res = await fetch(url, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-goog-api-key': apiKey,
+          },
+          body: JSON.stringify(body),
+          signal: request.signal,
+        })
+      } catch (err) {
+        if (this.isAbortError(err)) {
+          return { ok: false, reason: 'aborted' }
+        }
+        // fetch 自体の失敗(オフライン / DNS 等)
+        return { ok: false, reason: 'network' }
+      }
+
+      if (!res.ok) {
+        // 一時的サーバーエラーかつリトライ余地があれば待機して再送。
+        if (this.isTransientStatus(res.status) && attempt < GeminiProvider.MAX_RETRIES) {
+          this.deps.logger?.warn('GeminiProvider.generate: transient error, retrying', {
+            status: res.status,
+            attempt: attempt + 1,
+          })
+          await this.backoffDelay(attempt, request.signal)
+          continue
+        }
+        // 恒久エラー、またはリトライ上限超過 → 従来どおりのエラーへフォールバック。
+        return { ok: false, reason: this.mapHttpStatus(res.status) }
+      }
+
+      let json: GeminiResponse
+      try {
+        json = (await res.json()) as GeminiResponse
+      } catch (err) {
+        this.deps.logger?.error?.('GeminiProvider.generate: JSON parse failed', {
+          err: this.serializeError(err),
+        })
+        return { ok: false, reason: 'unknown' }
+      }
+
+      return this.parseResponse(json)
     }
 
-    if (!res.ok) {
-      return { ok: false, reason: this.mapHttpStatus(res.status) }
-    }
-
-    let json: GeminiResponse
-    try {
-      json = (await res.json()) as GeminiResponse
-    } catch (err) {
-      this.deps.logger?.error?.('GeminiProvider.generate: JSON parse failed', {
-        err: this.serializeError(err),
-      })
-      return { ok: false, reason: 'unknown' }
-    }
-
-    return this.parseResponse(json)
+    // ループは上限で必ず return 済み(到達しない保険)。
+    return { ok: false, reason: 'unknown' }
   }
 
   async isAvailable(): Promise<boolean> {
@@ -293,6 +319,40 @@ export class GeminiProvider implements AIProvider {
 
   private isAbortError(err: unknown): boolean {
     return err instanceof Error && err.name === 'AbortError'
+  }
+
+  /** 一時的(リトライ可能)なサーバーエラーか。4xx 恒久エラーは含めない。 */
+  private isTransientStatus(status: number): boolean {
+    return (
+      status === 429 || // rate limit(短時間の超過。待てば回復しうる)
+      status === 500 ||
+      status === 502 ||
+      status === 503 || // Service Unavailable(本件の主対象)
+      status === 504
+    )
+  }
+
+  /**
+   * 指数バックオフ + jitter で待機する。
+   * abort された場合は待たずに解決する(直後の aborted チェックで抜ける)。
+   */
+  private backoffDelay(attempt: number, signal?: AbortSignal): Promise<void> {
+    const base = GeminiProvider.BACKOFF_BASE_MS * Math.pow(2, attempt)
+    const jitter = Math.floor(Math.random() * GeminiProvider.BACKOFF_JITTER_MS)
+    const ms = base + jitter
+    return new Promise((resolve) => {
+      const timer = setTimeout(resolve, ms)
+      if (signal) {
+        signal.addEventListener(
+          'abort',
+          () => {
+            clearTimeout(timer)
+            resolve()
+          },
+          { once: true },
+        )
+      }
+    })
   }
 
   private serializeError(err: unknown): { name: string; message: string } {
