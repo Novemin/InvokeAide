@@ -40,11 +40,25 @@ const logger: Logger = {
  */
 function buildAuthConfig(): AuthConfig {
   const env = import.meta.env
+
+  // redirect_uri は実行時に開いている origin から算出する(同一ビルドで
+  // localhost 開発と本番 club-freedom.tokyo の両方を動かすため)。
+  // origin 優先・VITE_GOOGLE_REDIRECT_URI は真のフォールバック(origin 不在時のみ)。
+  // typeof window 判定はビルド時(SSR/Node 評価)で window 不在でも落ちないための保険。
+  const origin =
+    typeof window !== 'undefined' && window.location?.origin
+      ? window.location.origin
+      : undefined
+
+  const redirectUri = origin
+    ? `${origin}/auth/callback`
+    : ((env.VITE_GOOGLE_REDIRECT_URI as string | undefined) ?? '')
+
   return {
     clientId: (env.VITE_GOOGLE_CLIENT_ID as string | undefined) ?? '',
     // confidential client 用 secret(.env.local、gitignore 済)。トークン交換で必須。
     clientSecret: (env.VITE_GOOGLE_CLIENT_SECRET as string | undefined) ?? '',
-    redirectUri: (env.VITE_GOOGLE_REDIRECT_URI as string | undefined) ?? '',
+    redirectUri,
     // Stage1: ログイン情報 + Drive(drive.file) + Tasks
     stage1Scopes: [
       'openid',
