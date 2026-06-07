@@ -17,15 +17,28 @@ import type {
   AIProvider,
   AIProviderDeps,
   ChatFinishReason,
+  ChatMessage,
   ChatRequest,
   ChatResult,
   ChatUsage,
+  ToolCall,
 } from '@/interfaces/AIProvider'
 
 // Gemini generateContent レスポンス(必要分のみ)
+interface GeminiFunctionCall {
+  name?: string
+  args?: Record<string, unknown>
+}
 interface GeminiPart {
   text?: string
+  functionCall?: GeminiFunctionCall
 }
+
+// Gemini リクエストの parts(text / functionCall / functionResponse のいずれか)
+type GeminiReqPart =
+  | { text: string }
+  | { functionCall: { name: string; args: Record<string, unknown> } }
+  | { functionResponse: { name: string; response: unknown } }
 interface GeminiCandidate {
   content?: { parts?: GeminiPart[]; role?: string }
   finishReason?: string
@@ -150,16 +163,18 @@ export class GeminiProvider implements AIProvider {
   /** ChatMessage[] を Gemini の systemInstruction + contents に変換する */
   private buildRequestBody(request: ChatRequest): Record<string, unknown> {
     const systemTexts: string[] = []
-    const contents: Array<{ role: 'user' | 'model'; parts: Array<{ text: string }> }> = []
+    const contents: Array<{ role: 'user' | 'model'; parts: GeminiReqPart[] }> = []
 
     for (const msg of request.messages) {
       if (msg.role === 'system') {
         if (msg.content) systemTexts.push(msg.content)
         continue
       }
-      // 'assistant' は Gemini では 'model'
+      const parts = this.toGeminiParts(msg)
+      if (parts.length === 0) continue
+      // 'assistant' は Gemini では 'model'。tool 結果ターンは user ロールで返す(公式仕様)。
       const role = msg.role === 'assistant' ? 'model' : 'user'
-      contents.push({ role, parts: [{ text: msg.content }] })
+      contents.push({ role, parts })
     }
 
     const generationConfig: Record<string, number> = {}
@@ -177,7 +192,32 @@ export class GeminiProvider implements AIProvider {
     if (Object.keys(generationConfig).length > 0) {
       body.generationConfig = generationConfig
     }
+    // function calling: ツール定義はそのまま functionDeclarations に渡す(契約型 = Gemini サブセット)。
+    // toolConfig は省略 = AUTO(モデルが呼ぶか自然応答かを判断)。
+    if (request.tools && request.tools.length > 0) {
+      body.tools = [{ functionDeclarations: request.tools }]
+    }
     return body
+  }
+
+  /**
+   * 1 メッセージを Gemini の parts[] へ変換する。
+   *   - toolResults を持つ(role:'tool') → functionResponse part 群
+   *   - toolCalls を持つ(assistant) → functionCall part 群
+   *   - それ以外 → text part(本文があれば)
+   */
+  private toGeminiParts(msg: ChatMessage): GeminiReqPart[] {
+    if (msg.toolResults && msg.toolResults.length > 0) {
+      return msg.toolResults.map((tr) => ({
+        functionResponse: { name: tr.name, response: tr.response },
+      }))
+    }
+    if (msg.toolCalls && msg.toolCalls.length > 0) {
+      return msg.toolCalls.map((tc) => ({
+        functionCall: { name: tc.name, args: tc.args ?? {} },
+      }))
+    }
+    return msg.content ? [{ text: msg.content }] : []
   }
 
   private parseResponse(json: GeminiResponse): ChatResult {
@@ -188,8 +228,20 @@ export class GeminiProvider implements AIProvider {
 
     const candidate = json.candidates?.[0]
     const finishReason = this.mapFinishReason(candidate?.finishReason)
+    const parts = candidate?.content?.parts ?? []
 
-    const text = (candidate?.content?.parts ?? [])
+    // function calling: モデルがツール呼び出しを要求した場合は text より優先して返す。
+    // 呼出側(chat.ts)が実行→結果を履歴に積んで再 generate する。
+    const toolCalls: ToolCall[] = parts
+      .map((p) => p.functionCall)
+      .filter((fc): fc is GeminiFunctionCall => !!fc && typeof fc.name === 'string')
+      .map((fc) => ({ name: fc.name as string, args: fc.args ?? {} }))
+    if (toolCalls.length > 0) {
+      const usage = this.mapUsage(json.usageMetadata)
+      return usage ? { ok: true, toolCalls, usage } : { ok: true, toolCalls }
+    }
+
+    const text = parts
       .map((p) => p.text ?? '')
       .join('')
       .trim()
