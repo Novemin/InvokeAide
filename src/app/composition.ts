@@ -18,6 +18,7 @@ import type { AIProvider, AIProviderConfig, AIInitResult } from '@/interfaces/AI
 import { IndexedDbSecretStore } from '@/implementations/IndexedDbSecretStore'
 import { GoogleAuthProvider } from '@/implementations/GoogleAuthProvider'
 import { GeminiProvider } from '@/implementations/GeminiProvider'
+import { createTasksService, type TasksService } from '@/services/tasksService'
 
 // Clock 抽象遵守(直接 new Date() を実装側に書かない、テスト容易性)。contract: now(): Date
 const clock: Clock = {
@@ -94,6 +95,8 @@ export interface AppServices {
   auth: GoogleAuthProvider
   /** LLM(BYOK Gemini)。契約型で公開(将来 Claude/OpenAI に差し替え可能) */
   ai: AIProvider
+  /** Google Tasks「読む」サービス(S2-4)。auth のトークンで Tasks API を叩く。 */
+  tasks: TasksService
   status: {
     secretStore: SecretStoreInitResult
     auth: AuthInitOutcome
@@ -133,10 +136,15 @@ async function initServices(): Promise<AppServices> {
   // SecretStore 失敗環境でも、env フォールバック鍵で会話できる余地を残すため初期化は試みる。
   const aiResult = await ai.initialize({ secretStore, clock, logger, config: buildAIConfig() })
 
+  // Tasks「読む」サービス。auth.getAccessToken() でトークンを得て Tasks API を叩く。
+  // clock は「今日」判定に使う(直書きの new Date() を避ける)。
+  const tasks = createTasksService(auth, clock, logger)
+
   return {
     secretStore,
     auth,
     ai,
+    tasks,
     status: { secretStore: secretStoreResult, auth: authResult, ai: aiResult },
   }
 }
