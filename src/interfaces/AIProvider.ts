@@ -24,7 +24,11 @@ export interface AIProvider {
 
   initialize(deps: AIProviderDeps): Promise<AIInitResult>;
 
-  /** メッセージ列を渡して応答テキストを得る(基本会話) */
+  /**
+   * メッセージ列を渡して応答を得る(基本会話 + function calling)。
+   * request.tools を渡すと、応答が「テキスト」または「ツール呼び出し要求(toolCalls)」のいずれかになる。
+   * ツール往復(実行→結果を履歴に積んで再 generate)は呼出側(chat.ts)が回す。
+   */
   generate(request: ChatRequest): Promise<ChatResult>;
 
   /** 現環境で使えるか(鍵の有無)の軽量チェック。副作用なし。 */
@@ -53,16 +57,27 @@ export interface AIProviderConfig {
 
 // -- 会話の入出力 -------------------------------------------
 
-export type ChatRole = 'system' | 'user' | 'assistant';
+// 'tool' は function calling の往復で使う(ツール実行結果を履歴に積むターン)。
+export type ChatRole = 'system' | 'user' | 'assistant' | 'tool';
 
 export interface ChatMessage {
   role: ChatRole;
-  content: string;
+  /** テキスト本文。tool 往復メッセージ(toolCalls / toolResults を持つ)では省略可。 */
+  content?: string;
+  /**
+   * assistant がツール呼び出しを要求したターン(モデルの functionCall)。
+   * generate() が返した toolCalls をそのまま履歴に積み直して再 generate() するために使う。
+   */
+  toolCalls?: ToolCall[];
+  /** role:'tool' のターン。アプリがツールを実行した結果(functionResponse 相当)。 */
+  toolResults?: ToolResult[];
 }
 
 export interface ChatRequest {
   /** 時系列のメッセージ列(system は先頭にまとめて置く想定だが、実装側で集約する) */
   messages: ChatMessage[];
+  /** function calling 用のツール定義。省略時は従来どおりツール無しのテキスト会話。 */
+  tools?: ToolDeclaration[];
   /** 省略時は実装既定。0.0〜2.0 程度 */
   temperature?: number;
   /** 応答の最大出力トークン(概算) */
@@ -73,7 +88,50 @@ export interface ChatRequest {
 
 export type ChatResult =
   | { ok: true; text: string; finishReason: ChatFinishReason; usage?: ChatUsage }
+  // モデルがツール呼び出しを要求した(text はまだ無い)。呼出側が実行→再 generate する。
+  | { ok: true; toolCalls: ToolCall[]; usage?: ChatUsage }
   | { ok: false; reason: AIErrorReason };
+
+// -- function calling(ツール) --------------------------------
+
+/** モデルが要求したツール呼び出し(Gemini functionCall 相当)。 */
+export interface ToolCall {
+  /** 呼び出すツール名(ToolDeclaration.name と一致) */
+  name: string;
+  /** モデルが抽出した引数(functionCall.args)。スキーマ検証は呼出側の責務。 */
+  args: Record<string, unknown>;
+}
+
+/** ツール実行結果(Gemini functionResponse 相当)。 */
+export interface ToolResult {
+  /** どのツールの結果か(name 一致でモデルが対応づける) */
+  name: string;
+  /** functionResponse.response へ入れる任意の JSON(エラー時は { error } 等) */
+  response: unknown;
+}
+
+/**
+ * ツール定義(Gemini functionDeclarations 相当)。
+ * parameters は OpenAPI のサブセット(type/properties/description/enum/required/items のみ)。
+ */
+export interface ToolDeclaration {
+  name: string;
+  description: string;
+  parameters?: ToolParameterSchema;
+}
+
+export interface ToolParameterSchema {
+  type: 'object';
+  properties?: Record<string, ToolPropertySchema>;
+  required?: string[];
+}
+
+export interface ToolPropertySchema {
+  type: 'string' | 'number' | 'integer' | 'boolean' | 'array' | 'object';
+  description?: string;
+  enum?: string[];
+  items?: ToolPropertySchema;
+}
 
 export type ChatFinishReason =
   | 'stop' // 正常終了
