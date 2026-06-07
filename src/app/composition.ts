@@ -20,6 +20,10 @@ import { GoogleAuthProvider } from '@/implementations/GoogleAuthProvider'
 import { GeminiProvider } from '@/implementations/GeminiProvider'
 import { createTasksService, type TasksService } from '@/services/tasksService'
 
+// 応急(S2-4): 既定で参照するタスクリスト名。一致が無ければ tasksService が @default にフォール。
+// 将来の本実装で設定UIの選択値(Drive 保存)へ差し替える前提の暫定定数。
+const PREFERRED_TASK_LIST_TITLE = 'ToDo_by_MIYU'
+
 // Clock 抽象遵守(直接 new Date() を実装側に書かない、テスト容易性)。contract: now(): Date
 const clock: Clock = {
   now: () => new Date(),
@@ -138,7 +142,11 @@ async function initServices(): Promise<AppServices> {
 
   // Tasks「読む」サービス。auth.getAccessToken() でトークンを得て Tasks API を叩く。
   // clock は「今日」判定に使う(直書きの new Date() を避ける)。
-  const tasks = createTasksService(auth, clock, logger)
+  // preferredListTitle は応急(S2-4)の定数注入。将来は設定UIの選択値へ差し替える。
+  const tasks = createTasksService(auth, clock, {
+    preferredListTitle: PREFERRED_TASK_LIST_TITLE,
+    logger,
+  })
 
   return {
     secretStore,

@@ -5,6 +5,9 @@
 //
 // 範囲(S2-4①): 読み取り(read)のみ。追加・編集・削除は実装しない(後続指示)。
 //
+// 参照リスト(S2-4 応急): preferredListTitle に一致するタスクリストを tasklists.list で解決して使う。
+//   無い/失敗時は @default にフォール。リスト名は composition から定数注入(将来は設定値へ)。
+//
 // 構造化: notes 内の [予定時刻:HH:MM] / [期限:YYYY-MM-DD] を parseTaskNotes で分離し、
 //         { title, due, time, notes } の形にする(読み書き共用ヘルパ taskNotes を使用)。
 
@@ -46,6 +49,18 @@ export interface TasksService {
   getTasks(scope: TasksScope): Promise<GetTasksResult>
 }
 
+/** tasksService の生成時設定。 */
+export interface TasksServiceConfig {
+  /**
+   * 優先して使うタスクリストの title(例 'ToDo_by_MIYU')。
+   * 起動後の初回取得時に tasklists.list で title 一致のリストを探し、その id を使う。
+   * 一致が無い・取得失敗時は @default にフォール(他環境で壊れない保険)。
+   * null / 未指定なら @default 固定(従来挙動)。将来は設定値へ差し替え予定。
+   */
+  preferredListTitle?: string | null
+  logger?: Logger
+}
+
 // Tasks API レスポンス(必要分のみ)
 interface GoogleTask {
   id?: string
@@ -57,20 +72,73 @@ interface GoogleTask {
 interface GoogleTasksListResponse {
   items?: GoogleTask[]
 }
+interface GoogleTaskList {
+  id?: string
+  title?: string
+}
+interface GoogleTaskListsResponse {
+  items?: GoogleTaskList[]
+}
 
-const TASKS_ENDPOINT =
-  'https://tasks.googleapis.com/tasks/v1/lists/@default/tasks'
+const LISTS_ENDPOINT = 'https://tasks.googleapis.com/tasks/v1/users/@me/lists'
+const TASKS_BASE = 'https://tasks.googleapis.com/tasks/v1/lists'
+const DEFAULT_LIST_ID = '@default'
 
 /**
  * Tasks「読む」サービスを生成する。
  * @param auth getAccessToken() を持つ AuthProvider(本番は GoogleAuthProvider)
  * @param clock 「今日」判定に使う(テスト容易性のため new Date() を直書きしない)
+ * @param config 参照するタスクリスト名・logger(任意)
  */
 export function createTasksService(
   auth: Pick<AuthProvider, 'getAccessToken'>,
   clock: Clock,
-  logger?: Logger,
+  config: TasksServiceConfig = {},
 ): TasksService {
+  const logger = config.logger
+  // 解決済みのリスト id をセッション内でキャッシュする(毎回 tasklists.list を呼ばない)。
+  // 「定義的に確定した」結果(一致 id / 名前不在による @default)だけをキャッシュし、
+  // 一時的な失敗(ネットワーク等)はキャッシュせず次回再解決する。
+  let cachedListId: string | null = null
+
+  /** preferredListTitle に一致するリスト id を解決する。見つからない/失敗時は @default。 */
+  async function resolveListId(token: string): Promise<string> {
+    if (cachedListId) return cachedListId
+    const title = config.preferredListTitle
+    if (!title) {
+      cachedListId = DEFAULT_LIST_ID
+      return cachedListId
+    }
+    let res: Response
+    try {
+      res = await fetch(LISTS_ENDPOINT, { headers: { Authorization: `Bearer ${token}` } })
+    } catch {
+      logger?.warn('tasksService: tasklists.list error, using @default (will retry later)')
+      return DEFAULT_LIST_ID // キャッシュしない → 次回再解決
+    }
+    if (!res.ok) {
+      logger?.warn('tasksService: tasklists.list failed, using @default (will retry later)', {
+        status: res.status,
+      })
+      return DEFAULT_LIST_ID // キャッシュしない → 次回再解決
+    }
+    let json: GoogleTaskListsResponse
+    try {
+      json = (await res.json()) as GoogleTaskListsResponse
+    } catch {
+      return DEFAULT_LIST_ID
+    }
+    const match = (json.items ?? []).find((l) => l.title === title && !!l.id)
+    if (match?.id) {
+      cachedListId = match.id
+      return cachedListId
+    }
+    // リストが定義的に存在しない → @default を確定キャッシュ
+    logger?.info?.('tasksService: preferred list not found, using @default', { title })
+    cachedListId = DEFAULT_LIST_ID
+    return cachedListId
+  }
+
   async function getTasks(scope: TasksScope): Promise<GetTasksResult> {
     const tokenResult = await auth.getAccessToken()
     if (!tokenResult.ok) {
@@ -78,7 +146,10 @@ export function createTasksService(
       return { ok: false, reason: tokenResult.reason }
     }
 
-    const url = `${TASKS_ENDPOINT}?showCompleted=false&maxResults=100`
+    const listId = await resolveListId(tokenResult.token)
+    // @default はエイリアスのためエンコードしない。実 id のみ安全のためエンコード。
+    const listSegment = listId === DEFAULT_LIST_ID ? DEFAULT_LIST_ID : encodeURIComponent(listId)
+    const url = `${TASKS_BASE}/${listSegment}/tasks?showCompleted=false&maxResults=100`
     let res: Response
     try {
       res = await fetch(url, {
